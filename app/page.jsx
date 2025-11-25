@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Container, Row, Col, Card, Tabs, Tab, Form, Button } from 'react-bootstrap';
+import { setCurrentUser } from '../src/lib/userSession';
 
 export default function HomePage() {
   const router = useRouter();
@@ -25,14 +26,16 @@ export default function HomePage() {
   const handleLoginSubmit = (e) => {
     e.preventDefault();
     // TODO: call backend /login with loginForm
-    // For now just navigate to trader screen
+    // Frontend-only for now: remember user & go to trader
+    setCurrentUser(loginForm.username);
     router.push('/trader');
   };
 
   const handleSignupSubmit = (e) => {
     e.preventDefault();
     // TODO: call backend /users/create with signupForm
-    // For now also go to trader after "creation"
+    // Frontend-only for now: remember user & go to trader
+    setCurrentUser(signupForm.username);
     router.push('/trader');
   };
 
