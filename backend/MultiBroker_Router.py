@@ -1346,123 +1346,6 @@ def route_get_orders():
     return buckets
 
 
-
-@app.post("/cancel_order")
-def route_cancel_order(
-    payload: Dict[str, Any] = Body(...),
-    current_user: Optional[str] = Depends(get_current_user),
-):
-
-    # --- bucket by broker using your working helper
-       # choose correct clients folders
-    if current_user:
-        root = _ensure_user_tree(current_user)
-        DHAN_DIR_LOCAL = os.path.join(root, "clients", "dhan")
-        MO_DIR_LOCAL   = os.path.join(root, "clients", "motilal")
-    else:
-        DHAN_DIR_LOCAL = DHAN_DIR
-        MO_DIR_LOCAL   = MO_DIR
-
-
-    # -------------------------
-    # D H A N
-    # -------------------------
-    if by_broker["dhan"]:
-        try:
-            dh = importlib.import_module("Broker_dhan")
-
-            # Prefer a batch API if the module provides one
-            if hasattr(dh, "cancel_orders") and callable(getattr(dh, "cancel_orders")):
-                res = dh.cancel_orders(by_broker["dhan"])
-                if isinstance(res, list):
-                    messages.extend([str(x) for x in res])
-                elif isinstance(res, dict) and isinstance(res.get("message"), list):
-                    messages.extend([str(x) for x in res["message"]])
-                else:
-                    messages.append(str(res))
-            else:
-                # Fallback: call single-order helper cancel_order_dhan(...)
-                def _load_dhan_json(name: str) -> Optional[Dict[str, Any]]:
-                    needle = (name or "").strip().lower()
-                    try:
-                        for fn in os.listdir(DHAN_DIR):
-                            if not fn.endswith(".json"):
-                                continue
-                            path = os.path.join(DHAN_DIR, fn)
-                            with open(path, "r", encoding="utf-8") as f:
-                                cj = json.load(f)
-                            nm = (cj.get("name") or cj.get("display_name") or "").strip().lower()
-                            if nm == needle:
-                                return cj
-                    except FileNotFoundError:
-                        pass
-                    return None
-
-                for od in by_broker["dhan"]:
-                    name = od.get("name", "")
-                    oid  = od.get("order_id", "")
-                    cj   = _load_dhan_json(name)
-                    if not cj or not oid:
-                        messages.append(f"❌ Missing client JSON or order_id for {name}")
-                        continue
-                    try:
-                        resp = dh.cancel_order_dhan(cj, oid)
-                        ok = isinstance(resp, dict) and str(resp.get("status", "")).lower() == "success"
-                        if ok:
-                            messages.append(f"✅ Cancelled Order {oid} for {name}")
-                        else:
-                            err = (resp.get("message") if isinstance(resp, dict) else resp)
-                            messages.append(f"❌ Failed to cancel Order {oid} for {name}: {err}")
-                    except Exception as e:
-                        messages.append(f"❌ dhan cancel failed for {name}: {e}")
-
-        except Exception as e:
-            messages.append(f"❌ dhan cancel failed: {e}")
-
-    # -------------------------
-    # M O T I L A L
-    # -------------------------
-    if by_broker["motilal"]:
-        try:
-            mo = importlib.import_module("Broker_motilal")
-            if hasattr(mo, "cancel_orders") and callable(getattr(mo, "cancel_orders")):
-                res = mo.cancel_orders(by_broker["motilal"])
-                if isinstance(res, list):
-                    messages.extend([str(x) for x in res])
-                elif isinstance(res, dict) and isinstance(res.get("message"), list):
-                    messages.extend([str(x) for x in res["message"]])
-                else:
-                    messages.append(str(res))
-            else:
-                # Very defensive fallback: try a per-order function if it exists
-                for od in by_broker["motilal"]:
-                    try:
-                        if hasattr(mo, "cancel_order"):
-                            r = mo.cancel_order({"orders": [od]})
-                            if isinstance(r, dict) and isinstance(r.get("message"), list):
-                                messages.extend([str(x) for x in r["message"]])
-                            else:
-                                messages.append(str(r))
-                        else:
-                            messages.append("❌ motilal cancel: no suitable function exported")
-                    except Exception as e:
-                        messages.append(f"❌ motilal cancel failed: {e}")
-        except Exception as e:
-            messages.append(f"❌ motilal cancel failed: {e}")
-
-    # If nothing matched, keep the UI behaviour you expect
-    if not by_broker["dhan"] and not by_broker["motilal"]:
-        return {"message": ["No matching broker for the selected orders."]}
-
-    if unknown:
-        messages.append("ℹ️ Unknown broker for: " + ", ".join(sorted(set(unknown))))
-
-    return {"message": messages}
-
-
-
-
-
 @app.get("/get_positions")
 def route_get_positions():
     """Merge positions from both brokers into {open:[...], closed:[...]}"""
@@ -2188,5 +2071,29 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
