@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 APP_TITLE = "Wealth Ocean Multi-Broker Router"
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -23,7 +23,11 @@ DEFAULT_FRONTEND = "https://multibrokertradermultiuser-production-f735.up.railwa
 allowed_env = os.getenv("ALLOWED_ORIGINS", "").strip()
 
 if allowed_env:
-    ORIGINS = [o.strip() for o in allowed_env.split(",") if o.strip()]
+    ORIGINS = [
+        o.strip().rstrip("/")  # normalize (no trailing /)
+        for o in allowed_env.split(",")
+        if o.strip()
+    ]
 else:
     ORIGINS = [DEFAULT_FRONTEND]
 
@@ -38,7 +42,7 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------
-# Local filesystem cache (optional)
+# Local filesystem cache (optional – Railway can wipe it)
 # ---------------------------------------------------------
 DATA_DIR = os.path.abspath(
     os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
