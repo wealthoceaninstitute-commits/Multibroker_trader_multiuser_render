@@ -2,16 +2,17 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Container, Row, Col, Card, Tabs, Tab, Form, Button } from 'react-bootstrap';
-import { setCurrentUser } from '../src/lib/userSession';
+import { Container, Row, Col, Card, Tabs, Tab, Form, Button, Alert } from 'react-bootstrap';
+import { api } from '../src/lib/api';
 
 export default function HomePage() {
   const router = useRouter();
   const [tab, setTab] = useState('login');
 
-  // Simple local state – later we will connect to backend
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [signupForm, setSignupForm] = useState({ username: '', email: '', password: '' });
+
+  const [errorMsg, setErrorMsg] = useState('');
 
   const handleLoginChange = (e) => {
     const { name, value } = e.target;
@@ -23,20 +24,56 @@ export default function HomePage() {
     setSignupForm((prev) => ({ ...prev, [name]: value }));
   };
 
-  const handleLoginSubmit = (e) => {
+  // ==================
+  // LOGIN SUBMIT
+  // ==================
+  const handleLoginSubmit = async (e) => {
     e.preventDefault();
-    // TODO: call backend /login with loginForm
-    // Frontend-only for now: remember user & go to trader
-    setCurrentUser(loginForm.username);
-    router.push('/trader');
+    setErrorMsg("");
+
+    try {
+      const res = await api.post("/users/login", {
+        username: loginForm.username,
+        password: loginForm.password,
+      });
+
+      localStorage.setItem("username", res.data.username);
+      localStorage.setItem("token", res.data.token);
+
+      router.push("/trader");
+    } catch (err) {
+      const msg =
+        err?.response?.data?.detail ||
+        "Login failed. Please check your username or password.";
+
+      setErrorMsg(msg);
+    }
   };
 
-  const handleSignupSubmit = (e) => {
+  // ==================
+  // SIGNUP SUBMIT
+  // ==================
+  const handleSignupSubmit = async (e) => {
     e.preventDefault();
-    // TODO: call backend /users/create with signupForm
-    // Frontend-only for now: remember user & go to trader
-    setCurrentUser(signupForm.username);
-    router.push('/trader');
+    setErrorMsg("");
+
+    try {
+      const res = await api.post("/users/register", {
+        username: signupForm.username,
+        password: signupForm.password,
+        email: signupForm.email || "",
+      });
+
+      localStorage.setItem("username", res.data.username);
+      localStorage.setItem("token", res.data.token);
+
+      router.push("/trader");
+    } catch (err) {
+      const msg =
+        err?.response?.data?.detail ||
+        "User creation failed. Try a different username.";
+      setErrorMsg(msg);
+    }
   };
 
   return (
@@ -50,6 +87,8 @@ export default function HomePage() {
                 Multi-broker, multi-user trading panel
               </p>
 
+              {errorMsg && <Alert variant="danger">{errorMsg}</Alert>}
+
               <Tabs
                 id="auth-tabs"
                 activeKey={tab}
@@ -57,6 +96,7 @@ export default function HomePage() {
                 className="mb-3"
                 justify
               >
+                {/* ======================= LOGIN TAB ======================= */}
                 <Tab eventKey="login" title="Login">
                   <Form onSubmit={handleLoginSubmit}>
                     <Form.Group className="mb-3" controlId="loginUsername">
@@ -89,6 +129,7 @@ export default function HomePage() {
                   </Form>
                 </Tab>
 
+                {/* ======================= SIGNUP TAB ======================= */}
                 <Tab eventKey="signup" title="Create New User">
                   <Form onSubmit={handleSignupSubmit}>
                     <Form.Group className="mb-3" controlId="signupUsername">
@@ -98,7 +139,7 @@ export default function HomePage() {
                         name="username"
                         value={signupForm.username}
                         onChange={handleSignupChange}
-                        placeholder="Choose a user id"
+                        placeholder="Choose a username"
                         required
                       />
                     </Form.Group>
@@ -121,7 +162,7 @@ export default function HomePage() {
                         name="password"
                         value={signupForm.password}
                         onChange={handleSignupChange}
-                        placeholder="Create a password"
+                        placeholder="Create password"
                         required
                       />
                     </Form.Group>
