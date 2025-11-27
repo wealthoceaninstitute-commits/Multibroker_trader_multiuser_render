@@ -1,8 +1,9 @@
-
 'use client';
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card, Table, Tabs, Tab, Badge, Modal, Form, Spinner, InputGroup } from 'react-bootstrap';
 import api from './api';
+import { useRouter } from 'next/navigation';
 
 /* == tiny inline icons (no extra deps) == */
 const SearchIcon = (props) => (
@@ -53,7 +54,7 @@ function parseSymbol(raw) {
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     if (isTailFlag(t) || isYear(t) || isMonthHead(t)) {
-      if (undParts.length && isDay(undParts[undParts.length - 1])) undParts.pop();
+      if (undParts.length && isDay(undParts.length - 1)) undParts.pop();
       break;
     }
     undParts.push(t);
@@ -76,9 +77,13 @@ function canonicalKey(raw, { includeKind = false } = {}) {
   const base = (und && mon && year) ? `${und}-${mon}${year}` : sanitize(raw).replace(/[^A-Z0-9]/g, '');
   return includeKind ? `${base}-${kind}` : base;
 }
+
 /* ---------------------------------------------------- */
 
 export default function Orders() {
+
+  const router = useRouter();
+
   const [orders, setOrders] = useState({ pending: [], traded: [], rejected: [], cancelled: [], others: [] });
   const [selectedIds, setSelectedIds] = useState({});
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -89,7 +94,7 @@ export default function Orders() {
 
   // modify modal
   const [showModify, setShowModify] = useState(false);
-  const [modifyTarget, setModifyTarget] = useState(null); // {symbol, key, orders:[...]}
+  const [modifyTarget, setModifyTarget] = useState(null);
   const [modQty, setModQty] = useState('');
   const [modPrice, setModPrice] = useState('');
   const [modTrig, setModTrig] = useState('');
@@ -101,30 +106,49 @@ export default function Orders() {
   const snapRef = useRef('');
   const timerRef = useRef(null);
   const abortRef = useRef(null);
-
-  // dedicated modal container (prevents portal issues)
   const modalContainerRef = useRef(null);
+
+  /** Login redirect **/
+  useEffect(() => {
+    const token = localStorage.getItem("woi_token");
+    if (!token) router.push("/login");
+  }, []);
+
   useEffect(() => {
     if (typeof document !== 'undefined') {
       const el = document.createElement('div');
       el.id = 'orders-modal-root';
       document.body.appendChild(el);
       modalContainerRef.current = el;
-      return () => { try { document.body.removeChild(el); } catch {} };
+      return () => {
+        try { document.body.removeChild(el); } catch {}
+      };
     }
   }, []);
 
-  /* ===== fetch ===== */
+  /* ===== fetch with token ===== */
   const fetchAll = async () => {
     if (busyRef.current) return;
     if (typeof document !== 'undefined' && document.hidden) return;
+
+    const token = localStorage.getItem("woi_token");
+    if (!token) {
+      router.push("/login");
+      return;
+    }
 
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
     try {
-      const res = await api.get('/get_orders', { signal: controller.signal });
+      const res = await api.get('/users/get_orders', {
+        signal: controller.signal,
+        headers: {
+          "x-auth-token": token
+        }
+      });
+
       const next = {
         pending: res.data?.pending || [],
         traded: res.data?.traded || [],
@@ -139,191 +163,167 @@ export default function Orders() {
         setLastUpdated(new Date());
       }
     } catch (e) {
-      if (e.name !== 'CanceledError' && e.code !== 'ERR_CANCELED') {
-        console.warn('orders refresh failed', e?.message || e);
+      if (e?.response?.status === 401) {
+        localStorage.removeItem("woi_token");
+        router.push("/login");
       }
+      if (e.name !== 'CanceledError') console.warn("Orders refresh failed:", e.message);
     } finally {
       abortRef.current = null;
     }
   };
 
   useEffect(() => {
-    fetchAll().catch(() => {});
-    timerRef.current = setInterval(() => { fetchAll().catch(() => {}); }, AUTO_REFRESH_MS);
+    fetchAll();
+    timerRef.current = setInterval(fetchAll, AUTO_REFRESH_MS);
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+      clearInterval(timerRef.current);
       if (abortRef.current) abortRef.current.abort();
     };
   }, []);
 
-  /* ========= helpers ========= */
+  /* ===== Helpers ===== */
   const rowKey = (row) =>
     String(row.order_id ?? `${row.name ?? ''}|${row.symbol ?? ''}|${row.status ?? ''}`);
 
   const toggle = (rowId) =>
     setSelectedIds((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
 
-  // always read from full pending list (not filtered / not DOM)
   const getSelectedPending = () => {
     const picked = [];
     orders.pending.forEach((row) => {
       const id = rowKey(row);
       if (selectedIds[id]) {
         picked.push({
-          name: row.name ?? '',
-          symbol: row.symbol ?? '',
-          price: row.price ?? '',
-          order_id: row.order_id ?? '',
-          status: row.status ?? '',
-          // capture broker/client if present in your payload
-          broker: row.broker ?? row.broker_name ?? row.vendor ?? row.gateway ?? null,
-          client_id: row.client_id ?? row.clientId ?? row.client ?? null,
+          name: row.name,
+          symbol: row.symbol,
+          price: row.price,
+          order_id: row.order_id,
+          status: row.status,
+          broker: row.broker ?? null,
+          client_id: row.client_id ?? null,
         });
       }
     });
     return picked;
   };
 
-  /* ----- Cancel ----- */
+  /* ===== Cancel ===== */
   const cancelSelected = async () => {
-    const selectedOrders = getSelectedPending().map((o) => ({
-      name: o.name, symbol: o.symbol, order_id: o.order_id,
-      ...(o.client_id ? { client_id: o.client_id } : {}),
-      ...(o.broker ? { broker: o.broker } : {}),
-    }));
-    if (selectedOrders.length === 0) return alert('No orders selected.');
+    const selected = getSelectedPending();
+    if (selected.length === 0) return alert("No orders selected.");
+
+    const token = localStorage.getItem("woi_token");
+    if (!token) return router.push("/login");
 
     try {
       busyRef.current = true;
-      const res = await api.post('/cancel_order', { orders: selectedOrders });
-      alert(Array.isArray(res.data?.message) ? res.data.message.join('\n') : 'Cancel request sent');
+      const res = await api.post('/users/cancel_order',
+        { orders: selected },
+        { headers: { "x-auth-token": token } }
+      );
+      alert("Cancel request sent.");
       setSelectedIds({});
-      await fetchAll();
-    } catch (e) {
-      alert('Cancel failed: ' + (e.response?.data || e.message));
+      fetchAll();
+    } catch (err) {
+      alert("Cancel failed: " + (err.response?.data || err.message));
     } finally {
       busyRef.current = false;
     }
   };
 
-  /* ----- Modify ----- */
+  /* ===== Modify ===== */
   const requires = (displayType) => {
     const canon = DISPLAY_TO_CANON[displayType] || displayType;
-    return { price: ['LIMIT', 'STOPLOSS'].includes(canon), trig: ['STOPLOSS', 'STOPLOSS_MARKET'].includes(canon), canon };
+    return { price: ['LIMIT','STOPLOSS'].includes(canon), trig: ['STOPLOSS','STOPLOSS_MARKET'].includes(canon), canon };
   };
 
   const tryFetchLTP = async (symbol) => {
+    const token = localStorage.getItem("woi_token");
+    if (!token) return;
+
     try {
-      const r = await api.get('/ltp', { params: { symbol } });
+      const r = await api.get('/users/ltp', {
+        params: { symbol },
+        headers: { "x-auth-token": token }
+      });
       const v = Number(r?.data?.ltp);
-      if (!Number.isNaN(v)) setModLTP(v.toFixed(2));
-    } catch { /* ignore 404 etc. */ }
+      if (!isNaN(v)) setModLTP(v.toFixed(2));
+    } catch {}
   };
 
   const openModify = () => {
     const chosen = getSelectedPending();
-    if (chosen.length === 0) { alert('Select at least one order in Pending to modify.'); return; }
+    if (chosen.length === 0) return alert("Select pending order(s) to modify.");
 
-    const key0 = canonicalKey(chosen[0].symbol, { includeKind: false });
-    const allSame = chosen.every((c) => canonicalKey(c.symbol, { includeKind: false }) === key0);
-
+    const key0 = canonicalKey(chosen[0].symbol);
+    const allSame = chosen.every((c) => canonicalKey(c.symbol) === key0);
     if (!allSame) {
-      const diag = chosen.map((c) => `${c.symbol} → ${canonicalKey(c.symbol, { includeKind:false })}`).join('\n');
-      alert('Please select orders with the SAME Symbol to batch modify.\n\n' + diag);
+      alert("All selected orders must have the same base symbol.");
       return;
     }
 
-    const single = chosen.length === 1;
-    setModifyTarget({ symbol: chosen[0].symbol, key: key0, orders: chosen });
-    setModPrice(single ? (Number.isFinite(parseFloat(chosen[0].price)) ? String(parseFloat(chosen[0].price)) : '') : '');
-    setModTrig('');
+    setModifyTarget({ symbol: chosen[0].symbol, orders: chosen });
     setModQty('');
+    setModPrice('');
+    setModTrig('');
     setModType('NO_CHANGE');
     setModLTP('—');
     setShowModify(true);
-    if (chosen[0].symbol) tryFetchLTP(chosen[0].symbol);
+    tryFetchLTP(chosen[0].symbol);
   };
 
   const submitModify = async () => {
     if (!modifyTarget) return;
+
     const need = requires(modType);
+    const token = localStorage.getItem("woi_token");
+    if (!token) return router.push("/login");
 
-    let qtyNum, priceNum, trigNum;
-    if (modQty !== '') {
-      qtyNum = parseInt(modQty, 10);
-      if (Number.isNaN(qtyNum) || qtyNum <= 0) return alert('Quantity must be a positive integer.');
-    }
-    if (modPrice !== '') {
-      priceNum = parseFloat(modPrice);
-      if (Number.isNaN(priceNum) || priceNum <= 0) return alert('Price must be a positive number.');
-    }
-    if (modTrig !== '') {
-      trigNum = parseFloat(modTrig);
-      if (Number.isNaN(trigNum) || trigNum <= 0) return alert('Trigger price must be a positive number.');
-    }
-    if (modType !== 'NO_CHANGE') {
-      if (need.price && !(modPrice !== '' && priceNum > 0)) return alert('Selected Order Type requires Price.');
-      if (need.trig && !(modTrig !== '' && trigNum > 0)) return alert('Selected Order Type requires Trigger Price.');
-    }
-    if (modType === 'NO_CHANGE' && modQty === '' && modPrice === '' && modTrig === '') {
-      return alert('Nothing to update. Change Qty / Price / Trigger Price / Order Type.');
-    }
+    const mods = modifyTarget.orders.map((o) => {
+      const payload = {
+        name: o.name,
+        symbol: o.symbol,
+        order_id: o.order_id,
+        broker: o.broker,
+        client_id: o.client_id,
+      };
 
-    setModSaving(true);
-    busyRef.current = true;
+      if (modType !== 'NO_CHANGE') payload.ordertype = need.canon;
+      if (modQty !== '') payload.quantity = parseInt(modQty);
+      if (modPrice !== '') payload.price = parseFloat(modPrice);
+      if (modTrig !== '') payload.triggerprice = parseFloat(modTrig);
+
+      return api.post('/users/modify_order',
+        { order: payload },
+        { headers: { "x-auth-token": token } }
+      );
+    });
 
     try {
-      // one POST per order, explicitly tagged with broker & client_id when available
-      const requests = modifyTarget.orders.map((o) => {
-        const payload = {
-          name: o.name,
-          symbol: o.symbol,
-          order_id: o.order_id,
-          ...(o.client_id ? { client_id: o.client_id } : {}),
-          ...(o.broker ? { broker: o.broker } : {}),
-        };
-        if (modType !== 'NO_CHANGE') payload.ordertype = need.canon;
-        if (modQty !== '') payload.quantity = qtyNum;
-        if (modPrice !== '') payload.price = priceNum;
-        if (modTrig !== '') payload.triggerprice = trigNum;
-
-        return api.post('/modify_order', { order: payload });
-      });
-
-      const results = await Promise.allSettled(requests);
-      const ok = results.filter((r) => r.status === 'fulfilled').length;
-      const fail = results.length - ok;
-
-      let msg = `Modified ${ok} of ${results.length} order(s)`;
-      const failMsgs = results
-        .map((r) => (r.status === 'rejected' ? (r.reason?.response?.data || r.reason?.message) : null))
-        .filter(Boolean)
-        .slice(0, 5);
-      if (fail > 0 && failMsgs.length) msg += `\nFailed: ${fail}\n- ${failMsgs.join('\n- ')}`;
-      alert(msg);
-
+      setModSaving(true);
+      await Promise.allSettled(mods);
+      alert("Order(s) modified.");
       setShowModify(false);
       setSelectedIds({});
-      await fetchAll();
-    } catch (e) {
-      alert('Modify failed: ' + (e.response?.data || e.message));
+      fetchAll();
+    } catch (err) {
+      alert("Modify failed: " + err.message);
     } finally {
       setModSaving(false);
-      busyRef.current = false;
     }
   };
 
-  /* ------- search + highlight ------- */
+  /* ===== Search + Filter ===== */
   const escapeReg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const highlightSymbol = (sym) => {
     const text = sym ?? 'N/A';
     if (!text || qTokens.length === 0) return text;
     try {
       const re = new RegExp(`(${qTokens.map(escapeReg).join('|')})`, 'gi');
-      const parts = String(text).split(re);
-      return parts.map((p, i) =>
-        re.test(p) ? <mark key={i} className="hl">{p}</mark> : <span key={i}>{p}</span>
-      );
+      return text.split(re).map((p, i) => re.test(p)
+        ? <mark key={i} className="hl">{p}</mark>
+        : <span key={i}>{p}</span>);
     } catch {
       return text;
     }
@@ -331,10 +331,11 @@ export default function Orders() {
 
   const filterBySymbol = (rows) => {
     if (qTokens.length === 0) return rows;
-    return rows.filter((r) => {
-      const sym = String(r.symbol || '').toUpperCase();
-      return qTokens.every((t) => sym.includes(t.toUpperCase()));
-    });
+    return rows.filter((r) =>
+      qTokens.every((t) =>
+        (r.symbol ?? '').toUpperCase().includes(t.toUpperCase())
+      )
+    );
   };
 
   const filtered = useMemo(() => ({
@@ -345,191 +346,183 @@ export default function Orders() {
     others: filterBySymbol(orders.others),
   }), [orders, qTokens]);
 
-  /* --------------------------------------------------- */
-
+  /* ===== Modal Renderer ===== */
   const renderModifyModal = () => {
     if (!modifyTarget) return null;
+
     const need = requires(modType);
-    const isBatch = modifyTarget.orders?.length > 1;
+    const multi = modifyTarget.orders.length > 1;
 
     return (
       <Modal
-        container={modalContainerRef.current || undefined}
+        container={modalContainerRef.current}
         show={showModify}
         onHide={() => setShowModify(false)}
         backdrop="static"
         centered
-        contentClassName="blueTone modalCardPad"
       >
         <Modal.Header closeButton>
-          <Modal.Title>{isBatch ? 'Modify Orders (Batch)' : 'Modify Order'}</Modal.Title>
+          <Modal.Title>{multi ? "Modify Orders" : "Modify Order"}</Modal.Title>
         </Modal.Header>
         <Modal.Body>
-          <div className="small mb-2">
-            <div><strong>Symbol:</strong> {modifyTarget.symbol}</div>
-            <div>
-              {isBatch
-                ? <span><strong>Selected:</strong> {modifyTarget.orders.length} pending orders</span>
-                : <span><strong>Order ID:</strong> {modifyTarget.orders[0]?.order_id}</span>}
-            </div>
-          </div>
-
-          {/* LTP display */}
           <div className="mb-2">
-            <div className="text-uppercase text-muted" style={{ fontSize: '0.75rem' }}>LTP</div>
-            <div style={{ fontWeight: 700, fontSize: '1.1rem' }}>{modLTP}</div>
+            <strong>Symbol:</strong> {modifyTarget.symbol}
           </div>
 
-          <Form onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submitModify(); } }}>
+          <div className="mb-2">
+            <div className="text-muted small">LTP</div>
+            <div style={{ fontWeight: 700 }}>{modLTP}</div>
+          </div>
+
+          <Form>
             <Form.Group className="mb-2">
-              <Form.Label className="label-tight">Quantity</Form.Label>
+              <Form.Label>Quantity</Form.Label>
               <Form.Control
-                type="number" min="1" step="1"
-                value={modQty} onChange={(e) => setModQty(e.target.value)}
-                placeholder={isBatch ? 'Leave blank to keep same (ALL)' : 'Leave blank to keep same'}
+                type="number"
+                value={modQty}
+                onChange={(e) => setModQty(e.target.value)}
               />
             </Form.Group>
 
             <Form.Group className="mb-2">
-              <Form.Label className="label-tight">
-                Price {modType !== 'NO_CHANGE' && need.price ? <span className="text-danger">*</span> : null}
+              <Form.Label>
+                Price {need.price ? <span className="text-danger">*</span> : ""}
               </Form.Label>
               <Form.Control
-                type="number" min="0" step="0.05"
-                value={modPrice} onChange={(e) => setModPrice(e.target.value)}
-                placeholder={need.price ? 'Required for selected type' : (isBatch ? 'Leave blank to keep same (ALL)' : 'Leave blank to keep same')}
+                type="number"
+                value={modPrice}
+                onChange={(e) => setModPrice(e.target.value)}
               />
             </Form.Group>
 
             <Form.Group className="mb-3">
-              <Form.Label className="label-tight">
-                Trig. Price {modType !== 'NO_CHANGE' && need.trig ? <span className="text-danger">*</span> : null}
+              <Form.Label>
+                Trigger {need.trig ? <span className="text-danger">*</span> : ""}
               </Form.Label>
               <Form.Control
-                type="number" min="0" step="0.05"
-                value={modTrig} onChange={(e) => setModTrig(e.target.value)}
-                placeholder={need.trig ? 'Required for selected type' : (isBatch ? 'Leave blank to keep same (ALL)' : 'Leave blank to keep same')}
+                type="number"
+                value={modTrig}
+                onChange={(e) => setModTrig(e.target.value)}
               />
             </Form.Group>
 
-            <Form.Group className="mb-1">
-              <Form.Label className="mb-1 fw-semibold">Order Type</Form.Label>
-              <div className="d-flex align-items-center flex-wrap gap-3">
-                {['NO_CHANGE', 'LIMIT', 'MARKET', 'STOPLOSS', 'SL MARKET'].map((ot) => (
-                  <Form.Check
-                    key={ot} inline type="radio" name="modifyOrderType"
-                    label={ot.replace('SL MARKET', 'SL_MARKET')}
-                    checked={modType === ot} onChange={() => setModType(ot)}
-                  />
-                ))}
-              </div>
-              <div className="form-text">
-                LIMIT → needs <strong>Price</strong>. SL-L → needs <strong>Price</strong> &amp; <strong>Trig</strong>. SL-M → needs <strong>Trig</strong>.
-                {isBatch && <> Changes will apply to <strong>all selected orders</strong>.</>}
-              </div>
+            <Form.Group>
+              <Form.Label>Order Type</Form.Label>
+              {['NO_CHANGE', 'LIMIT', 'MARKET', 'STOPLOSS', 'SL MARKET'].map((t) => (
+                <Form.Check
+                  key={t}
+                  inline
+                  type="radio"
+                  name="modType"
+                  label={t}
+                  checked={modType === t}
+                  onChange={() => setModType(t)}
+                />
+              ))}
             </Form.Group>
           </Form>
         </Modal.Body>
-        <Modal.Footer className="footerNudge">
-          <Button variant="secondary" onClick={() => setShowModify(false)} disabled={modSaving}>Cancel</Button>
+
+        <Modal.Footer>
+          <Button variant="secondary" onClick={() => setShowModify(false)}>
+            Close
+          </Button>
           <Button variant="warning" onClick={submitModify} disabled={modSaving}>
-            {modSaving ? <Spinner size="sm" animation="border" className="me-2" /> : null}
+            {modSaving && <Spinner size="sm" className="me-2" />}
             Modify
           </Button>
         </Modal.Footer>
-
-        <style jsx global>{`
-          .modalCardPad { padding: 0.5rem 1.25rem 0.75rem; }
-          @media (min-width: 992px) { .modalCardPad { padding: 0.75rem 1.5rem 1rem; } }
-          .blueTone { background: linear-gradient(180deg, #f9fbff 0%, #f3f7ff 100%) !important;
-            border: 1px solid #d5e6ff !important; box-shadow: 0 0 0 6px rgba(49,132,253,.12) !important; border-radius: 10px !important; }
-          .label-tight { margin-bottom: 4px; }
-          .footerNudge { padding-right: 1.25rem; }
-          input[type="radio"], input[type="checkbox"] { accent-color: #0d6efd; }
-        `}</style>
       </Modal>
     );
   };
 
-  const renderTable = (rows, id) => (
-    <Table bordered hover size="sm" id={id}>
+  /* ===== Table renderer ===== */
+  const renderTable = (rows) => (
+    <Table bordered hover size="sm">
       <thead>
         <tr>
-          <th>Select</th><th>Name</th><th>Symbol</th><th>Type</th><th>Qty</th><th>Price</th><th>Status</th><th>Order ID</th>
+          <th>Select</th>
+          <th>Name</th>
+          <th>Symbol</th>
+          <th>Type</th>
+          <th>Qty</th>
+          <th>Price</th>
+          <th>Status</th>
+          <th>Order ID</th>
         </tr>
       </thead>
       <tbody>
         {rows.length === 0 ? (
           <tr><td colSpan={8} className="text-center">No data</td></tr>
-        ) : rows.map((row) => {
-          const idKey = rowKey(row);
-          return (
-            <tr key={idKey} data-rowid={idKey}>
-              <td><input type="checkbox" checked={!!selectedIds[idKey]} onChange={() => toggle(idKey)} /></td>
-              <td>{row.name ?? 'N/A'}</td>
-              <td>{highlightSymbol(row.symbol)}</td>
-              <td>{row.transaction_type ?? 'N/A'}</td>
-              <td>{row.quantity ?? 'N/A'}</td>
-              <td>{row.price ?? 'N/A'}</td>
-              <td>{row.status ?? 'N/A'}</td>
-              <td>{row.order_id ?? 'N/A'}</td>
-            </tr>
-          );
-        })}
+        ) : (
+          rows.map((row) => {
+            const idKey = rowKey(row);
+            return (
+              <tr key={idKey}>
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={!!selectedIds[idKey]}
+                    onChange={() => toggle(idKey)}
+                  />
+                </td>
+                <td>{row.name ?? 'N/A'}</td>
+                <td>{highlightSymbol(row.symbol)}</td>
+                <td>{row.transaction_type ?? 'N/A'}</td>
+                <td>{row.quantity ?? 'N/A'}</td>
+                <td>{row.price ?? 'N/A'}</td>
+                <td>{row.status ?? 'N/A'}</td>
+                <td>{row.order_id ?? 'N/A'}</td>
+              </tr>
+            );
+          })
+        )}
       </tbody>
     </Table>
   );
 
   return (
-    <Card className="p-3 softCard">
+    <Card className="p-3">
       {/* Toolbar */}
       <div className="mb-3 d-flex gap-2 align-items-center flex-wrap">
-        <Button onClick={() => fetchAll()}>Refresh Orders</Button>
+        <Button onClick={fetchAll}>Refresh Orders</Button>
         <Button variant="warning" onClick={openModify}>Modify Order</Button>
         <Button variant="danger" onClick={cancelSelected}>Cancel Order</Button>
 
-        {/* quick sanity: selection count */}
-        <Badge bg="info" className="ms-1">{Object.values(selectedIds).filter(Boolean).length} selected</Badge>
+        <Badge bg="info" className="ms-1">
+          {Object.values(selectedIds).filter(Boolean).length} selected
+        </Badge>
 
-        {/* Search by Symbol */}
         <div className="ms-auto">
-          <InputGroup className="searchGroup">
-            <InputGroup.Text title="Search by Symbol"><SearchIcon /></InputGroup.Text>
+          <InputGroup>
+            <InputGroup.Text><SearchIcon /></InputGroup.Text>
             <Form.Control
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Escape') setQuery(''); }}
-              placeholder="Search symbol (e.g., RELIANCE)"
-              aria-label="Search by symbol"
+              placeholder="Search symbol…"
             />
-            {query ? (
-              <Button variant="outline-secondary" onClick={() => setQuery('')} title="Clear"><XCircle /></Button>
-            ) : null}
+            {query && (
+              <Button variant="outline-secondary" onClick={() => setQuery('')}>
+                <XCircle />
+              </Button>
+            )}
           </InputGroup>
         </div>
 
         <Badge bg="secondary" className="ms-2">
-          Auto-refresh: {Math.round(AUTO_REFRESH_MS / 1000)}s {lastUpdated ? `· Updated ${lastUpdated.toLocaleTimeString()}` : ''}
+          Refresh {AUTO_REFRESH_MS / 1000}s
+          {lastUpdated && ` · ${lastUpdated.toLocaleTimeString()}`}
         </Badge>
       </div>
 
       <Tabs defaultActiveKey="pending" className="mb-3">
-        <Tab eventKey="pending" title="Pending">{renderTable(filtered.pending, 'pending_table')}</Tab>
-        <Tab eventKey="traded" title="Traded">{renderTable(filtered.traded, 'traded_table')}</Tab>
-        <Tab eventKey="rejected" title="Rejected">{renderTable(filtered.rejected, 'rejected_table')}</Tab>
-        <Tab eventKey="cancelled" title="Cancelled">{renderTable(filtered.cancelled, 'cancelled_table')}</Tab>
-        <Tab eventKey="others" title="Others">{renderTable(filtered.others, 'others_table')}</Tab>
+        <Tab eventKey="pending" title="Pending">{renderTable(filtered.pending)}</Tab>
+        <Tab eventKey="traded" title="Traded">{renderTable(filtered.traded)}</Tab>
+        {renderTable(filtered.rejected)}
+        <Tab eventKey="rejected" title="Rejected" />
+        <Tab eventKey="cancelled" title="Cancelled">{renderTable(filtered.cancelled)}</Tab>
+        <Tab eventKey="others" title="Others">{renderTable(filtered.others)}</Tab>
       </Tabs>
-
-      {/* styles */}
-      <style jsx global>{`
-        .softCard { border: 1px solid #e6efff; box-shadow: 0 2px 12px rgba(13,110,253,.06); border-radius: 12px; }
-        .searchGroup { min-width: 280px; max-width: 360px; }
-        .searchGroup .input-group-text { background: #eaf3ff; border-color: #cfe2ff; }
-        .searchGroup .form-control { border-color: #cfe2ff; }
-        .searchGroup .btn { border-color: #cfe2ff; }
-        mark.hl { background: #fff3cd; padding: 0 2px; border-radius: 2px; }
-      `}</style>
 
       {renderModifyModal()}
     </Card>
