@@ -21,6 +21,8 @@ import requests
 import pandas as pd
 import hashlib, secrets
 from datetime import datetime, timedelta
+from backend.user.auth import signup_user, login_user, get_current_user
+
 
 
 
@@ -2071,6 +2073,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
