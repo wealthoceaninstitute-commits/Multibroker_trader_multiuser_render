@@ -1,124 +1,101 @@
 "use client";
+
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-const API = process.env.NEXT_PUBLIC_API_BASE;
+export default function LoginPage() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
 
-export default function Login() {
-  const [email,setEmail] = useState("");
-  const [password,setPassword] = useState("");
   const router = useRouter();
 
-  async function login() {
-    try {
-      if (!API) {
-        alert("API base URL (NEXT_PUBLIC_API_BASE) is not set");
-        return;
-      }
+  const API_BASE = process.env.NEXT_PUBLIC_API_BASE;
 
-      const res = await fetch(`${API}/users/login`, {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        // backend expects `username` + `password`
+  async function handleLogin(e) {
+    e.preventDefault();
+    setLoading(true);
+
+    try {
+      const res = await fetch(`${API_BASE}/users/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
         body: JSON.stringify({
-          username: email,   // again, we use email as username
-          password: password
+          email,      // ✅ REQUIRED BY BACKEND
+          password
         })
       });
 
-      const data = await res.json().catch(() => ({}));
+      const data = await res.json();
 
       if (!res.ok) {
-        const detail =
-          (Array.isArray(data.detail) ? JSON.stringify(data.detail) : data.detail) ||
-          "❌ Invalid credentials";
-        alert(detail);
-        console.error("Login error:", data);
+        alert(data.detail || "Login failed");
+        setLoading(false);
         return;
       }
 
-      if(data.success){
-        localStorage.setItem("x-auth-token", data.token);
-        localStorage.setItem("user", data.username);
-        router.push("/trade");
-      } else {
-        alert(data.detail || "❌ Invalid credentials");
-      }
+      // Save token
+      localStorage.setItem("token", data.token);
+      localStorage.setItem("username", data.username);
 
-    } catch(error){
-      alert("❌ Server not reachable");
-      console.error(error);
+      alert("✅ Login successful");
+
+      // Redirect to main app
+      router.push("/trade");
+
+    } catch (err) {
+      console.error(err);
+      alert("Server not reachable");
+    } finally {
+      setLoading(false);
     }
   }
 
   return (
-    <div style={{
-      display:"flex",
-      justifyContent:"center",
-      alignItems:"center",
-      height:"100vh",
-      background:"linear-gradient(135deg, #020617, #1e3a8a)"
-    }}>
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-black to-blue-900">
+      <div className="bg-white p-8 rounded-xl shadow-xl w-96">
+        <h1 className="text-2xl font-bold mb-6 text-center">Login</h1>
 
-      <div style={{
-        width:370,
-        background:"white",
-        padding:30,
-        borderRadius:12,
-        boxShadow:"0 20px 40px rgba(0,0,0,0.3)",
-        textAlign:"center"
-      }}>
+        <form onSubmit={handleLogin} className="space-y-4">
+          <input
+            type="email"
+            placeholder="Email"
+            className="w-full border p-2 rounded"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
 
-        <h2 style={{marginBottom:20, fontSize:24}}>Login</h2>
+          <input
+            type="password"
+            placeholder="Password"
+            className="w-full border p-2 rounded"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
 
-        <input
-          style={inputStyle}
-          placeholder="Email"
-          type="email"
-          onChange={e=>setEmail(e.target.value)}
-        />
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-blue-700 text-white py-2 rounded hover:bg-blue-800"
+          >
+            {loading ? "Logging in..." : "Login"}
+          </button>
+        </form>
 
-        <input
-          style={inputStyle}
-          placeholder="Password"
-          type="password"
-          onChange={e=>setPassword(e.target.value)}
-        />
-
-        <button style={btnStyle} onClick={login}>
-          Login
-        </button>
-
-        <p
-          style={{marginTop:15,cursor:"pointer",color:"#1e40af"}}
-          onClick={()=>router.push("/signup")}
-        >
-          Create new account
+        <p className="text-center text-sm mt-4">
+          Don’t have an account?{" "}
+          <a
+            href="/signup"
+            className="text-blue-600 underline"
+          >
+            Create new account
+          </a>
         </p>
-
       </div>
     </div>
   );
 }
-
-const inputStyle = {
-  width:"100%",
-  padding:"12px",
-  marginBottom:15,
-  borderRadius:8,
-  border:"1px solid #ccc",
-  outline:"none",
-  fontSize:14
-};
-
-const btnStyle = {
-  width:"100%",
-  padding:"12px",
-  background:"#1e40af",
-  color:"white",
-  border:"none",
-  borderRadius:8,
-  cursor:"pointer",
-  fontWeight:"bold",
-  fontSize:15
-};
