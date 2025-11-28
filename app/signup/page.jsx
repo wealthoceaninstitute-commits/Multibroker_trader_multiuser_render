@@ -2,9 +2,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-const API =
-  process.env.NEXT_PUBLIC_API_BASE ||
-  "https://multibrokertradermultiuser-production-f393.up.railway.app"; // fallback, adjust if needed
+const API = process.env.NEXT_PUBLIC_API_BASE;
 
 export default function Signup() {
   const [name, setName] = useState("");
@@ -15,25 +13,24 @@ export default function Signup() {
   async function signup() {
     try {
       if (!API) {
-        alert("API base URL not configured");
+        alert("API base URL (NEXT_PUBLIC_API_BASE) is not set");
         return;
       }
 
       const res = await fetch(`${API}/users/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // 🔴 backend expects `username`, not `email`
+        // backend expects `username` + `password`
         body: JSON.stringify({
-          username: email,   // we use email as username
+          username: email,   // using email as username
           password: password,
-          name: name         // extra field, backend will ignore
+          name: name         // extra field; backend ignores
         })
       });
 
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        // For 422, data.detail is usually an array
         const detail =
           (Array.isArray(data.detail) ? JSON.stringify(data.detail) : data.detail) ||
           "❌ Error creating user";
