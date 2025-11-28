@@ -1,99 +1,128 @@
 "use client";
-
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-export default function LoginPage() {
-  const router = useRouter();
-
+export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading,setLoading] = useState(false);
 
-  const API = process.env.NEXT_PUBLIC_API_BASE;
+  const router = useRouter();
 
-  const handleLogin = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-
+  async function login() {
     try {
-      const res = await fetch(`${API}/users/login`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email: email.trim().toLowerCase(),
-          password: password,
-        }),
-      });
+      setLoading(true);
+
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_BASE}/users/login`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password })
+        }
+      );
 
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(
-          data?.detail || data?.message || "Invalid login credentials"
-        );
+        alert(data.detail || "Login failed");
+        setLoading(false);
+        return;
       }
 
-      // Save token & user
-      localStorage.setItem("token", data.token);
+      // Save token
+      localStorage.setItem("auth_token", data.token);
       localStorage.setItem("username", data.username);
 
       alert("✅ Login Successful");
 
-      // Redirect after login
-      router.push("/");
+      // LAND ON TRADE PAGE (NEXT STAGE)
+      router.push("/trade");
+
     } catch (err) {
-      alert("❌ " + err.message);
-    } finally {
+      alert("Server not reachable");
+      console.error(err);
+    }
+    finally{
       setLoading(false);
     }
-  };
+  }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#030b2f] via-[#061955] to-[#020815] flex items-center justify-center">
-      <div className="bg-white p-10 rounded-xl shadow-2xl w-[400px]">
-        <h1 className="text-3xl font-bold text-center mb-6">Login</h1>
+    <div style={{
+      display: "flex",
+      justifyContent: "center",
+      alignItems: "center",
+      height: "100vh",
+      background: "linear-gradient(135deg, #0f172a, #1e3a8a)"
+    }}>
 
-        <form onSubmit={handleLogin} className="space-y-4">
-          <input
-            type="email"
-            placeholder="Email"
-            className="w-full p-3 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-          />
+      <div style={{
+        width: 350,
+        background: "white",
+        padding: 30,
+        borderRadius: 12,
+        boxShadow: "0 20px 40px rgba(0,0,0,0.3)",
+        textAlign: "center"
+      }}>
 
-          <input
-            type="password"
-            placeholder="Password"
-            className="w-full p-3 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-          />
+        <h2 style={{ marginBottom: 20 }}>Login</h2>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-blue-700 text-white p-3 rounded hover:bg-blue-800 transition-all"
-          >
-            {loading ? "Logging in..." : "Login"}
-          </button>
-        </form>
+        <input
+          style={inputStyle}
+          placeholder="Email"
+          type="email"
+          onChange={e => setEmail(e.target.value)}
+        />
 
-        <p className="mt-6 text-center text-sm">
-          Don’t have an account?{" "}
-          <a
-            href="/signup"
-            className="text-blue-700 font-semibold hover:underline"
-          >
-            Create new account
-          </a>
+        <input
+          style={inputStyle}
+          placeholder="Password"
+          type="password"
+          onChange={e => setPassword(e.target.value)}
+        />
+
+        <button
+          style={{
+            ...btnStyle,
+            background: loading ? "#64748b" : "#1e40af"
+          }}
+          onClick={login}
+          disabled={loading}
+        >
+          {loading ? "Logging in..." : "Login"}
+        </button>
+
+        <p
+          style={{ marginTop: 15, cursor: "pointer", color: "#1e40af" }}
+          onClick={() => router.push("/signup")}
+        >
+          Don&apos;t have account? Create new account
         </p>
+
       </div>
     </div>
   );
+}
+
+
+const inputStyle = {
+  width: "100%",
+  padding: "12px",
+  marginBottom: 15,
+  borderRadius: 8,
+  border: "1px solid #ccc",
+  outline: "none",
+  fontSize: 14
+}
+
+const btnStyle = {
+  width: "100%",
+  padding: "12px",
+  background: "#1e40af",
+  color: "white",
+  border: "none",
+  borderRadius: 8,
+  cursor: "pointer",
+  fontWeight: "bold"
 }
