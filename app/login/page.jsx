@@ -1,280 +1,259 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { getCurrentUser, setCurrentUser } from "../../src/lib/userSession";
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import {
+  Container,
+  Tabs,
+  Tab,
+  Form,
+  Button,
+  Alert,
+  Spinner,
+} from "react-bootstrap";
+import {
+  getCurrentUser,
+  setCurrentUser,
+} from "../../src/lib/userSession";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
 export default function LoginPage() {
-  const [activeTab, setActiveTab] = useState("login"); // "login" | "register"
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [email, setEmail] = useState("");
+  const router = useRouter();
+
+  const [activeTab, setActiveTab] = useState("login");
+  const [loginForm, setLoginForm] = useState({
+    username: "",
+    password: "",
+  });
+  const [signupForm, setSignupForm] = useState({
+    username: "",
+    password: "",
+    confirmPassword: "",
+  });
   const [loading, setLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState(null);
-  const [successMsg, setSuccessMsg] = useState(null);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
 
-  // If already logged in (user in localStorage), go directly to trader page
+  // If already logged in, go directly to trader
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const user = getCurrentUser();
-    if (user) {
-      window.location.href = "/trader";
+    const existing = getCurrentUser();
+    if (existing && existing.username) {
+      router.replace("/trader");
     }
-  }, []);
+  }, [router]);
 
-  function resetMessages() {
-    setErrorMsg(null);
-    setSuccessMsg(null);
-  }
+  // ---------- handlers ----------
 
-  async function handleLogin(e) {
+  const handleLoginChange = (e) => {
+    const { name, value } = e.target;
+    setLoginForm((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleSignupChange = (e) => {
+    const { name, value } = e.target;
+    setSignupForm((prev) => ({ ...prev, [name]: value }));
+  };
+
+  async function handleLoginSubmit(e) {
     e.preventDefault();
-    resetMessages();
+    setError("");
+    setMessage("");
 
-    if (!username || !password) {
-      setErrorMsg("Please enter both username and password.");
+    if (!loginForm.username || !loginForm.password) {
+      setError("Please enter both User ID and Password.");
       return;
     }
 
+    setLoading(true);
     try {
-      setLoading(true);
-      const resp = await fetch(`${API_BASE}/users/login`, {
+      const resp = await fetch(`${API_BASE}/login`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ username, password }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: loginForm.username,
+          password: loginForm.password,
+        }),
       });
+
+      if (!resp.ok) {
+        let detail = "Login failed";
+        try {
+          const data = await resp.json();
+          if (data?.detail) detail = data.detail;
+        } catch {
+          // ignore JSON error
+        }
+        throw new Error(detail);
+      }
 
       const data = await resp.json().catch(() => ({}));
 
-      if (!resp.ok) {
-        setErrorMsg(
-          typeof data?.detail === "string"
-            ? data.detail
-            : "Login failed. Please check your credentials."
-        );
-        return;
-      }
+      // Save to one consistent place
+      setCurrentUser({
+        username: data.username || loginForm.username,
+        token: data.token || "",
+      });
 
-      const token = data.authToken || data.token;
-      if (!token) {
-        setErrorMsg("Login succeeded but token missing in response.");
-        return;
-      }
-
-      if (typeof window !== "undefined") {
-        // for axios interceptor in src/lib/api.js
-        window.localStorage.setItem("token", token);
-        // for /trader guard (userSession.js)
-        setCurrentUser(data.username || username);
-      }
-
-      setSuccessMsg("Login successful. Redirecting…");
-      window.location.href = "/trader";
+      // Go to trader page and STAY there
+      router.push("/trader");
     } catch (err) {
       console.error("Login error:", err);
-      setErrorMsg("Network error while logging in.");
+      setError(err.message || "Login failed");
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleRegister(e) {
+  async function handleSignupSubmit(e) {
     e.preventDefault();
-    resetMessages();
+    setError("");
+    setMessage("");
 
-    if (!username || !password) {
-      setErrorMsg("Username and password are required.");
+    if (
+      !signupForm.username ||
+      !signupForm.password ||
+      !signupForm.confirmPassword
+    ) {
+      setError("Please fill all fields.");
       return;
     }
 
+    if (signupForm.password !== signupForm.confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+
+    setLoading(true);
     try {
-      setLoading(true);
-      const resp = await fetch(`${API_BASE}/users/register`, {
+      const resp = await fetch(`${API_BASE}/create_user`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ username, password }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: signupForm.username,
+          password: signupForm.password,
+        }),
       });
 
-      const data = await resp.json().catch(() => ({}));
-
       if (!resp.ok) {
-        setErrorMsg(
-          typeof data?.detail === "string"
-            ? data.detail
-            : "User creation failed. Try a different username."
-        );
-        return;
+        let detail = "Failed to create user";
+        try {
+          const data = await resp.json();
+          if (data?.detail) detail = data.detail;
+        } catch {
+          // ignore
+        }
+        throw new Error(detail);
       }
 
-      const token = data.authToken || data.token;
-      if (!token) {
-        setErrorMsg("User created but token missing in response.");
-        return;
-      }
-
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem("token", token);
-        setCurrentUser(data.username || username);
-      }
-
-      setSuccessMsg("User created successfully. Redirecting…");
-      window.location.href = "/trader";
+      setMessage("User created successfully. You can now login.");
+      setActiveTab("login");
+      setSignupForm({ username: "", password: "", confirmPassword: "" });
     } catch (err) {
-      console.error("Register error:", err);
-      setErrorMsg("Network error while creating user.");
+      console.error("Signup error:", err);
+      setError(err.message || "Failed to create user");
     } finally {
       setLoading(false);
     }
   }
 
-  const isLogin = activeTab === "login";
+  // ---------- JSX ----------
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="w-full max-w-xl bg-white shadow-md rounded-lg p-8">
-        <h1 className="text-2xl font-semibold text-center mb-2">
-          Wealth Ocean – Login
-        </h1>
-        <p className="text-center text-gray-600 mb-6">
-          Multi-broker, multi-user trading panel
-        </p>
+    <Container className="mt-5" style={{ maxWidth: "600px" }}>
+      <h1 className="text-center mb-2">Wealth Ocean – Login</h1>
+      <p className="text-center text-muted">
+        Multi-broker, multi-user trading panel
+      </p>
 
-        {/* Tabs */}
-        <div className="flex border-b mb-6">
-          <button
-            className={`flex-1 py-2 text-center ${
-              isLogin
-                ? "border-b-2 border-blue-600 font-semibold"
-                : "text-gray-500"
-            }`}
-            onClick={() => {
-              setActiveTab("login");
-              resetMessages();
-            }}
-          >
-            Login
-          </button>
-          <button
-            className={`flex-1 py-2 text-center ${
-              !isLogin
-                ? "border-b-2 border-blue-600 font-semibold"
-                : "text-gray-500"
-            }`}
-            onClick={() => {
-              setActiveTab("register");
-              resetMessages();
-            }}
-          >
-            Create New User
-          </button>
-        </div>
+      {error && <Alert variant="danger">{error}</Alert>}
+      {message && <Alert variant="success">{message}</Alert>}
 
-        {/* Alerts */}
-        {errorMsg && (
-          <div className="mb-4 rounded border border-red-300 bg-red-50 px-4 py-2 text-red-700 text-sm">
-            {errorMsg}
-          </div>
-        )}
-        {successMsg && (
-          <div className="mb-4 rounded border border-green-300 bg-green-50 px-4 py-2 text-green-700 text-sm">
-            {successMsg}
-          </div>
-        )}
-
-        {/* Forms */}
-        {isLogin ? (
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium mb-1">
-                User ID / Username
-              </label>
-              <input
+      <Tabs
+        id="login-tabs"
+        activeKey={activeTab}
+        onSelect={(k) => k && setActiveTab(k)}
+        className="mb-3"
+      >
+        <Tab eventKey="login" title="Login">
+          <Form onSubmit={handleLoginSubmit} className="mt-3">
+            <Form.Group className="mb-3" controlId="login-username">
+              <Form.Label>User ID / Username</Form.Label>
+              <Form.Control
                 type="text"
-                className="w-full border rounded px-3 py-2 text-sm"
+                name="username"
                 placeholder="Enter your user id"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                disabled={loading}
+                value={loginForm.username}
+                onChange={handleLoginChange}
               />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium mb-1">Password</label>
-              <input
+            </Form.Group>
+            <Form.Group className="mb-3" controlId="login-password">
+              <Form.Label>Password</Form.Label>
+              <Form.Control
                 type="password"
-                className="w-full border rounded px-3 py-2 text-sm"
+                name="password"
                 placeholder="Enter your password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                disabled={loading}
+                value={loginForm.password}
+                onChange={handleLoginChange}
               />
-            </div>
+            </Form.Group>
+            <Button type="submit" disabled={loading}>
+              {loading ? (
+                <>
+                  <Spinner
+                    as="span"
+                    animation="border"
+                    size="sm"
+                    className="me-2"
+                  />
+                  Logging in...
+                </>
+              ) : (
+                "Login"
+              )}
+            </Button>
+          </Form>
+        </Tab>
 
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-blue-600 text-white font-semibold py-2 rounded hover:bg-blue-700 disabled:opacity-60"
-            >
-              {loading ? "Logging in..." : "Login"}
-            </button>
-          </form>
-        ) : (
-          <form onSubmit={handleRegister} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium mb-1">
-                User ID / Username
-              </label>
-              <input
+        <Tab eventKey="signup" title="Create New User">
+          <Form onSubmit={handleSignupSubmit} className="mt-3">
+            <Form.Group className="mb-3" controlId="signup-username">
+              <Form.Label>User ID / Username</Form.Label>
+              <Form.Control
                 type="text"
-                className="w-full border rounded px-3 py-2 text-sm"
-                placeholder="Choose a user id"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                disabled={loading}
+                name="username"
+                placeholder="Choose a username"
+                value={signupForm.username}
+                onChange={handleSignupChange}
               />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium mb-1">
-                Email (optional)
-              </label>
-              <input
-                type="email"
-                className="w-full border rounded px-3 py-2 text-sm"
-                placeholder="Enter your email (optional)"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                disabled={loading}
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium mb-1">Password</label>
-              <input
+            </Form.Group>
+            <Form.Group className="mb-3" controlId="signup-password">
+              <Form.Label>Password</Form.Label>
+              <Form.Control
                 type="password"
-                className="w-full border rounded px-3 py-2 text-sm"
-                placeholder="Choose a password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                disabled={loading}
+                name="password"
+                placeholder="Create a password"
+                value={signupForm.password}
+                onChange={handleSignupChange}
               />
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-green-600 text-white font-semibold py-2 rounded hover:bg-green-700 disabled:opacity-60"
-            >
+            </Form.Group>
+            <Form.Group className="mb-3" controlId="signup-confirm">
+              <Form.Label>Confirm Password</Form.Label>
+              <Form.Control
+                type="password"
+                name="confirmPassword"
+                placeholder="Re-enter password"
+                value={signupForm.confirmPassword}
+                onChange={handleSignupChange}
+              />
+            </Form.Group>
+            <Button type="submit" disabled={loading}>
               {loading ? "Creating..." : "Create User"}
-            </button>
-          </form>
-        )}
-      </div>
-    </div>
+            </Button>
+          </Form>
+        </Tab>
+      </Tabs>
+    </Container>
   );
 }
