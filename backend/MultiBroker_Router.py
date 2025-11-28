@@ -299,64 +299,65 @@ def get_current_user(x_auth_token: str = Header(..., alias="x-auth-token")) -> s
 @app.post("/users/register", response_model=AuthResponse)
 def register(req: UserRegisterRequest):
     users = _load_users()
-    uname = req.username.strip()
-    logger.info(f"REGISTER attempt: {uname}")
 
-    if uname in users:
-        raise HTTPException(status_code=400, detail="Username already exists")
+    email = req.email.strip().lower()
 
-    users[uname] = {
+    if email in users:
+        raise HTTPException(status_code=400, detail="Email already exists")
+
+    users[email] = {
         "password_hash": _hash_password(req.password),
+        "name": req.name,
+        "email": email,
         "created_at": now_str(),
         "updated_at": now_str(),
     }
+
     _save_users(users)
 
-    # local folders (cache)
-    ensure_dir(_user_root(uname))
-    ensure_dir(_clients_root(uname))
+    ensure_dir(_user_root(email))
+    ensure_dir(_clients_root(email))
 
-    # session token
     token = uuid.uuid4().hex
-    ACTIVE_TOKENS[token] = uname
+    ACTIVE_TOKENS[token] = email
 
-    # GitHub: per-user metadata file (no password)
     user_doc = {
-        "username": uname,
-        "created_at": users[uname]["created_at"],
+        "name": req.name,
+        "email": email,
+        "created_at": users[email]["created_at"],
     }
+
     github_write_file(
-        f"users/{uname}/user.json",
+        f"users/{email}/user.json",
         json.dumps(user_doc, indent=2),
-        f"Create user {uname}",
+        f"Create user {email}",
     )
 
-    logger.info(f"REGISTER success for {uname}")
-    return AuthResponse(success=True, username=uname, token=token)
+    logger.info(f"REGISTERED: {email}")
+    return AuthResponse(success=True, username=email, token=token)
 
 
 @app.post("/users/login", response_model=AuthResponse)
 def login(req: UserLoginRequest):
     users = _load_users()
-    uname = req.username.strip()
-    logger.info(f"LOGIN attempt: {uname}")
+    email = req.email.strip().lower()
 
-    if uname not in users:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+    if email not in users:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    stored = users[uname]
+    stored = users[email]
+
     if not _verify_password(req.password, stored.get("password_hash", "")):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
     stored["updated_at"] = now_str()
     stored["last_login_at"] = now_str()
     _save_users(users)
 
     token = uuid.uuid4().hex
-    ACTIVE_TOKENS[token] = uname
-    logger.info(f"LOGIN success for {uname}")
+    ACTIVE_TOKENS[token] = email
 
-    return AuthResponse(success=True, username=uname, token=token)
+    return AuthResponse(success=True, username=email, token=token)
 
 
 @app.get("/users/me")
@@ -686,3 +687,4 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("MultiBroker_Router:app", host="0.0.0.0", port=8000, reload=True)
+
