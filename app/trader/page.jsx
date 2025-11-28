@@ -1,76 +1,80 @@
-'use client';
+"use client";
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
-import { Container, Tabs, Tab, Button } from 'react-bootstrap';
-import dynamic from 'next/dynamic';
-import { getCurrentUser, clearCurrentUser } from '../../src/lib/userSession';
-
-// Code-split tabs (faster initial load)
-const TradeForm   = dynamic(() => import('../../components/TradeForm'),   { ssr: false });
-const Orders      = dynamic(() => import('../../components/Orders'),      { ssr: false });
-const Positions   = dynamic(() => import('../../components/Positions'),   { ssr: false });
-const Holdings    = dynamic(() => import('../../components/Holdings'),    { ssr: false });
-const Summary     = dynamic(() => import('../../components/Summary'),     { ssr: false });
-const Clients     = dynamic(() => import('../../components/Clients'),     { ssr: false });
-const CopyTrading = dynamic(() => import('../../components/CopyTrading'), { ssr: false });
+import React, { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { clearCurrentUser, getCurrentUser } from "../../src/lib/userSession";
+import Tabs from "../../src/components/Tabs";
 
 export default function TraderPage() {
-  const [key, setKey] = useState('trade');
-  const [user, setUser] = useState(null);
   const router = useRouter();
+  const [user, setUser] = useState(null);
+  const [checking, setChecking] = useState(true); // ✅ prevents flicker loop
 
   useEffect(() => {
-    const u = getCurrentUser();
-    if (!u) {
-      // No user -> go back to login
-      router.replace('/');
+    // Wait for client side before checking
+    if (typeof window === "undefined") return;
+
+    const username = getCurrentUser();
+    const token = localStorage.getItem("token");
+
+    if (!username || !token) {
+      router.replace("/login");
     } else {
-      setUser(u);
+      setUser(username);
     }
+
+    setChecking(false);
   }, [router]);
 
   const handleLogout = () => {
     clearCurrentUser();
-    router.replace('/');
+    localStorage.removeItem("token");
+    localStorage.removeItem("username");
+    router.push("/login");
   };
 
-  // While checking user / redirecting, avoid flicker
-  if (!user) {
-    return null;
+  if (checking) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#f9fafb",
+        }}
+      >
+        <p style={{ color: "#64748b" }}>Loading...</p>
+      </div>
+    );
   }
 
+  if (!user) return null; // nothing till verified
+
   return (
-    <Container className="py-3">
-      <div className="d-flex justify-content-between align-items-center mb-3">
-        <h2 className="mb-0">Wealth Ocean – Multi-Broker Trader</h2>
-        <div className="d-flex align-items-center gap-2">
-          <span className="text-muted small">
-            Logged in as <strong>{user}</strong>
-          </span>
-          <Button size="sm" variant="outline-secondary" onClick={handleLogout}>
-            Logout
-          </Button>
-        </div>
+    <div style={{ padding: "20px" }}>
+      <h1 style={{ textAlign: "center", marginBottom: "10px" }}>
+        Wealth Ocean – Multi-Broker Trader
+      </h1>
+      <div style={{ textAlign: "right", marginBottom: "10px" }}>
+        <span style={{ marginRight: "8px", color: "#475569" }}>
+          Logged in as <b>{user}</b>
+        </span>
+        <button
+          onClick={handleLogout}
+          style={{
+            border: "1px solid #cbd5e1",
+            padding: "4px 8px",
+            borderRadius: "6px",
+            cursor: "pointer",
+            background: "#fff",
+          }}
+        >
+          Logout
+        </button>
       </div>
 
-      <Tabs
-        id="trader-main-tabs"
-        activeKey={key}
-        onSelect={(k) => setKey(k || 'trade')}
-        className="mb-3"
-        mountOnEnter
-        unmountOnExit
-        justify
-      >
-        <Tab eventKey="trade"       title="Trade"><TradeForm /></Tab>
-        <Tab eventKey="orders"      title="Orders"><Orders /></Tab>
-        <Tab eventKey="positions"   title="Positions"><Positions /></Tab>
-        <Tab eventKey="holdings"    title="Holdings"><Holdings /></Tab>
-        <Tab eventKey="summary"     title="Summary"><Summary /></Tab>
-        <Tab eventKey="clients"     title="Clients"><Clients /></Tab>
-        <Tab eventKey="copytrading" title="Copy Trading"><CopyTrading /></Tab>
-      </Tabs>
-    </Container>
+      <Tabs />
+    </div>
   );
 }
