@@ -11,6 +11,9 @@ python-multipart>=0.0.9
 psycopg[binary,pool]>=3.2
 cryptography>=42.0.0
 dhanhq
+python-jose
+passlib[bcrypt]
+
 
 
 
