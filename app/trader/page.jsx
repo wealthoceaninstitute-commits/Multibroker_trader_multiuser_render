@@ -2,87 +2,44 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Container, Tabs, Tab, Button } from "react-bootstrap";
-import { getCurrentUser, clearCurrentUser } from "../../src/lib/userSession";
 
 export default function TraderPage() {
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState("trade");
-  const [username, setUsername] = useState("");
+  const [user, setUser] = useState(null);
 
   useEffect(() => {
-    const user = getCurrentUser();
-    if (!user || !user.username) {
+    const loggedIn = localStorage.getItem("auth");
+    const u = localStorage.getItem("user");
+
+    if (!loggedIn || !u) {
       router.replace("/login");
     } else {
-      setUsername(user.username);
+      setUser(u);
     }
-  }, [router]);
+  }, []);
 
-  const handleLogout = () => {
-    clearCurrentUser();
+  const logout = () => {
+    localStorage.clear();
     router.replace("/login");
   };
 
+  if (!user) return null;
+
   return (
-    <Container fluid className="mt-3">
+    <div style={{ padding: "20px" }}>
+      <h1>Wealth Ocean – Multi-Broker Trader</h1>
+      <p>Logged in as <strong>{user}</strong></p>
 
-      {/* Top header */}
-      <div className="d-flex justify-content-between align-items-center mb-3">
-        <h4>Wealth Ocean – MultiBroker Dashboard</h4>
-        <div>
-          <strong>{username}</strong>{" "}
-          <Button size="sm" variant="outline-danger" onClick={handleLogout}>
-            Logout
-          </Button>
-        </div>
+      <button onClick={logout}>Logout</button>
+
+      <hr style={{ margin: "20px 0" }} />
+
+      {/* YOUR EXISTING COMPONENTS CAN BE ADDED BELOW */}
+      <h3>Trade | Orders | Positions | Holdings | Summary | Clients | Copy Trading</h3>
+
+      <div style={{ marginTop: "20px" }}>
+        Place your TradeForm.jsx here next ✅
       </div>
-
-      {/* Tabs */}
-      <Tabs
-        activeKey={activeTab}
-        onSelect={(k) => setActiveTab(k)}
-        className="mb-3"
-        justify
-      >
-
-        <Tab eventKey="trade" title="Trade">
-          <h5>Trade Panel</h5>
-          <p>This is your TradeForm area (will connect later)</p>
-        </Tab>
-
-        <Tab eventKey="orders" title="Orders">
-          <h5>Orders</h5>
-          <p>Orders will come here</p>
-        </Tab>
-
-        <Tab eventKey="positions" title="Positions">
-          <h5>Positions</h5>
-          <p>Open positions here</p>
-        </Tab>
-
-        <Tab eventKey="holdings" title="Holdings">
-          <h5>Holdings</h5>
-          <p>Your holdings here</p>
-        </Tab>
-
-        <Tab eventKey="summary" title="Summary">
-          <h5>Summary</h5>
-          <p>Account summary here</p>
-        </Tab>
-
-        <Tab eventKey="clients" title="Clients">
-          <h5>Clients</h5>
-          <p>Client management here</p>
-        </Tab>
-
-        <Tab eventKey="copy" title="Copy Trading">
-          <h5>Copy Trading</h5>
-          <p>Copy trading setup here</p>
-        </Tab>
-
-      </Tabs>
-
-    </Container>
+    </div>
   );
 }
