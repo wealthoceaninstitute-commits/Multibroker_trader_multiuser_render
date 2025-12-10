@@ -1,11 +1,18 @@
 [phases.setup]
-nixPackages = ["python312", "pip", "nodejs_18"]
+nixPkgs = ["python312", "nodejs_18", "openssl", "gcc"]
 
 [phases.install]
-cmds = [
-  "pip install -r requirements.txt",
-  "npm install"
+commands = [
+  "python3 -m ensurepip",
+  "python3 -m pip install --upgrade pip",
+  "python3 -m pip install -r requirements.txt"
+]
+
+[phases.build]
+commands = [
+  "npm install --force || true",
+  "npm run build || true"
 ]
 
 [start]
-cmd = "python3 -m uvicorn MultiBroker_Router:app --host 0.0.0.0 --port $PORT"
+command = "python3 -m uvicorn MultiBroker_Router:app --host 0.0.0.0 --port $PORT"
