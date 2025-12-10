@@ -321,61 +321,45 @@ def _save(path: str, data: Dict[str, Any]):
 # ---------- minimal save (no hard failures) ----------
 def _save_minimal(broker: str, payload: Dict[str, Any]) -> str:
     """
-    Save ONLY modal fields + session_active.
-    motilal: name, userid, password, pan, apikey, totpkey, capital, session_active
-    dhan:    name, userid, apikey, capital, session_active
+    Stores only user-provided credential fields (no auto token logic).
+    Normalized for Dhan & Motilal.
     """
     userid = _pick(payload.get("userid"), payload.get("client_id"))
     if not userid:
         raise HTTPException(status_code=400, detail="client_id / userid is required")
-    name   = _pick(payload.get("name"), payload.get("display_name"), userid)
 
-   if broker == "dhan":
-    doc = {
-        "name": name,
-        "userid": userid,
+    name = _pick(payload.get("name"), payload.get("display_name"), userid)
 
-        # Old field kept
-        "apikey": _pick(
-            payload.get("apikey"),
-            (payload.get("creds") or {}).get("access_token")
-        ),
+    if broker == "dhan":
+        doc = {
+            "userid": userid,
+            "name": name,
+            "mobile": _pick(payload.get("mobile"), payload.get("mobile_number")),
+            "pin": _pick(payload.get("pin")),
+            "apikey": _pick(payload.get("apikey")),
+            "api_secret": _pick(payload.get("api_secret")),
+            "totpkey": _pick(payload.get("totpkey")),
+            "capital": payload.get("capital", ""),
+            "session_active": False
+        }
 
-        # NEW FIELDS
-        "mobile": _pick(payload.get("mobile"), payload.get("mobile_number")),
-        "pin": payload.get("pin", ""),
-        "api_secret": payload.get("api_secret", ""),
-        "totpkey": payload.get("totpkey", ""),
-
-        "capital": payload.get("capital", ""),
-        "session_active": bool(payload.get("session_active", False)),
-    }
-
-    else:  # motilal
+    else:  # motilal — unchanged
         creds = payload.get("creds") or {}
         doc = {
-            "name": name,
             "userid": userid,
+            "name": name,
             "password": _pick(payload.get("password"), creds.get("password")),
-            # ← NEW: accept pan from multiple places / casings
-            "pan": _pick(payload.get("pan"), creds.get("pan"), creds.get("PAN")),
-            # ← NEW: accept apikey from multiple places / casings
-            "apikey": _pick(
-                payload.get("apikey"),
-                creds.get("apikey"), creds.get("api_key"), creds.get("apiKey")
-            ),
-            # already worked via creds.mpin, keep plus more fallbacks
-            "totpkey": _pick(
-                payload.get("totpkey"),
-                creds.get("totpkey"), creds.get("mpin"), creds.get("otp")
-            ),
+            "pan": _pick(payload.get("pan"), creds.get("pan")),
+            "apikey": _pick(payload.get("apikey"), creds.get("apikey")),
+            "totpkey": _pick(payload.get("totpkey"), creds.get("totpkey")),
             "capital": payload.get("capital", ""),
-            "session_active": bool(payload.get("session_active", False)),
+            "session_active": False,
         }
 
     path = _path_for(broker, userid)
     _save(path, doc)
     return path
+
 
 def _update_minimal(broker: str, payload: Dict[str, Any]) -> str:
     """
@@ -408,29 +392,19 @@ def _update_minimal(broker: str, payload: Dict[str, Any]) -> str:
         existing = {}
 
     # Build merged doc (keep existing field when new candidate is empty)
-    if broker == "dhan":
+   if broker == "dhan":
     doc = {
-        "name":           _pick(name, existing.get("name")),
-        "userid":         userid,
-
-        "apikey": _pick(
-            payload.get("apikey"),
-            (payload.get("creds") or {}).get("access_token"),
-            existing.get("apikey")
-        ),
-
-        # NEW (keep existing if empty)
-        "mobile": _pick(
-            payload.get("mobile"), payload.get("mobile_number"),
-            existing.get("mobile")
-        ),
+        "userid": userid,
+        "name": _pick(name, existing.get("name")),
+        "mobile": _pick(payload.get("mobile"), payload.get("mobile_number"), existing.get("mobile")),
         "pin": _pick(payload.get("pin"), existing.get("pin")),
+        "apikey": _pick(payload.get("apikey"), existing.get("apikey")),
         "api_secret": _pick(payload.get("api_secret"), existing.get("api_secret")),
         "totpkey": _pick(payload.get("totpkey"), existing.get("totpkey")),
-
         "capital": payload.get("capital", existing.get("capital")),
-        "session_active": bool(payload.get("session_active", existing.get("session_active", False))),
+        "session_active": existing.get("session_active", False)
     }
+
 
     else:  # motilal
         creds = payload.get("creds") or {}
@@ -2006,6 +1980,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
