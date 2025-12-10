@@ -11,6 +11,11 @@ python-multipart>=0.0.9
 psycopg[binary,pool]>=3.2
 cryptography>=42.0.0
 dhanhq
+playwright
+pytest-playwright
+pyee==11.0.1
+typing-extensions>=4.7.1
+
 
 
 
