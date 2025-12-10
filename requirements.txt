@@ -9,7 +9,7 @@ websocket-client==1.8.0
 pyotp==2.9.0
 python-multipart>=0.0.9
 psycopg[binary,pool]>=3.2
-cryptography>=42.0.0
+cryptography==41.0.7
 dhanhq>=2.0.2
 
 # Headless automation
@@ -17,4 +17,5 @@ playwright==1.49.0
 pytest-playwright==0.5.2
 pyee==11.0.1
 typing-extensions>=4.7.1
+
 
