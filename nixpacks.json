@@ -1,0 +1,7 @@
+{
+  "phases": {
+    "setup": {
+      "nixPkgs": ["python312", "pip", "nodejs_18", "openssl", "gcc"]
+    }
+  }
+}
