@@ -23,6 +23,8 @@ _symbol_db_lock = threading.Lock()
 GITHUB_OWNER  = os.getenv("GITHUB_REPO_OWNER") or "wealthoceaninstitute-commits"
 GITHUB_REPO   = os.getenv("GITHUB_REPO_NAME")  or "Dhan_test"
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+
 
 
 def GH_HEADERS():
@@ -277,6 +279,7 @@ def router_search_symbols(q: str = Query(""), exchange: str = Query("")):
 @app.on_event("startup")
 def _symbols_startup():
     _lazy_init_symbol_db()
+    print("[startup] symbols ready | GitHub sync disabled")
 
 
 def _safe(s: str) -> str:
@@ -393,47 +396,49 @@ def _update_minimal(broker: str, payload: Dict[str, Any]) -> str:
 
     # Build merged doc (keep existing field when new candidate is empty)
   # Build merged doc (keep existing field when new candidate is empty)
-if broker == "dhan":
-    doc = {
-        "userid": userid,
-        "name": _pick(name, existing.get("name")),
-        "mobile": _pick(
-            payload.get("mobile"),
-            payload.get("mobile_number"),
-            existing.get("mobile"),
-        ),
-        "pin": _pick(payload.get("pin"), existing.get("pin")),
-        "apikey": _pick(payload.get("apikey"), existing.get("apikey")),
-        "api_secret": _pick(payload.get("api_secret"), existing.get("api_secret")),
-        "totpkey": _pick(payload.get("totpkey"), existing.get("totpkey")),
-        "capital": payload.get("capital", existing.get("capital")),
-        "session_active": existing.get("session_active", False),
-    }
-else:  # motilal
-    creds = payload.get("creds") or {}
-    doc = {
-        "name": _pick(name, existing.get("name")),
-        "userid": userid,
-        "password": _pick(
-            payload.get("password"),
-            creds.get("password"),
-            existing.get("password"),
-        ),
-        "pan": _pick(payload.get("pan"), creds.get("pan"), existing.get("pan")),
-        "mpin": _pick(payload.get("mpin"), creds.get("mpin"), existing.get("mpin")),
-        "apikey": _pick(
-            payload.get("apikey"),
-            creds.get("apikey"),
-            existing.get("apikey"),
-        ),
-        "totpkey": _pick(
-            payload.get("totpkey"),
-            creds.get("totpkey"),
-            existing.get("totpkey"),
-        ),
-        "capital": payload.get("capital", existing.get("capital")),
-        "session_active": existing.get("session_active", False),
-    }
+    # Build merged doc (keep existing field when new candidate is empty)
+    if broker == "dhan":
+        doc = {
+            "userid": userid,
+            "name": _pick(name, existing.get("name")),
+            "mobile": _pick(
+                payload.get("mobile"),
+                payload.get("mobile_number"),
+                existing.get("mobile"),
+            ),
+            "pin": _pick(payload.get("pin"), existing.get("pin")),
+            "apikey": _pick(payload.get("apikey"), existing.get("apikey")),
+            "api_secret": _pick(payload.get("api_secret"), existing.get("api_secret")),
+            "totpkey": _pick(payload.get("totpkey"), existing.get("totpkey")),
+            "capital": payload.get("capital", existing.get("capital")),
+            "session_active": existing.get("session_active", False),
+        }
+    else:  # motilal
+        creds = payload.get("creds") or {}
+        doc = {
+            "name": _pick(name, existing.get("name")),
+            "userid": userid,
+            "password": _pick(
+                payload.get("password"),
+                creds.get("password"),
+                existing.get("password"),
+            ),
+            "pan": _pick(payload.get("pan"), creds.get("pan"), existing.get("pan")),
+            "mpin": _pick(payload.get("mpin"), creds.get("mpin"), existing.get("mpin")),
+            "apikey": _pick(
+                payload.get("apikey"),
+                creds.get("apikey"),
+                existing.get("apikey"),
+            ),
+            "totpkey": _pick(
+                payload.get("totpkey"),
+                creds.get("totpkey"),
+                existing.get("totpkey"),
+            ),
+            "capital": payload.get("capital", existing.get("capital")),
+            "session_active": existing.get("session_active", False),
+        }
+
 
     # Write new file
     _save(new_path, doc)
@@ -681,10 +686,6 @@ def _build_multipliers(children: list[str], rawm) -> dict[str, float]:
 
 # ---------- routes ----------
 
-@app.on_event("startup")
-def _symbols_startup():
-    _lazy_init_symbol_db()
-    print("[TEST MODE] GitHub sync disabled.")
 
 
 @app.get("/health")
@@ -1994,6 +1995,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
