@@ -15,7 +15,7 @@ dhanhq>=2.0.2
 # Headless automation
 playwright==1.49.0
 pytest-playwright==0.5.2
-pyee==11.0.1
 typing-extensions>=4.7.1
+
 
 
