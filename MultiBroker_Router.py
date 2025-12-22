@@ -701,444 +701,444 @@ def health():
             status[key] = f"error: {e}"
     return {"ok": True, "brokers": status}
 
-@app.post("/add_client")
-def add_client(background_tasks: BackgroundTasks, payload: Dict[str, Any] = Body(...)):
-    broker = (_pick(payload.get("broker")) or "motilal").lower()
-    if broker not in ("dhan", "motilal"):
-        raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'")
-
-    path = _save_minimal(broker, payload)
-    background_tasks.add_task(_dispatch_login, broker, path)
-    return {"success": True, "message": f"Saved for {broker}. Login started if fields complete."}
-
-@app.post("/edit_client")
-def edit_client(background_tasks: BackgroundTasks, payload: Dict[str, Any] = Body(...)):
-    """
-    Edits an existing client. Accepts the same payload shape as /add_client,
-    plus optional original_broker/original_userid when renaming/moving.
-    Saves, then triggers background login if required fields are present.
-    """
-    broker = (_pick(payload.get("broker")) or "motilal").lower()
-    if broker not in ("dhan", "motilal"):
-        raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'")
-
-    path = _update_minimal(broker, payload)
-    background_tasks.add_task(_dispatch_login, broker, path)
-    return {"success": True, "message": f"Updated for {broker}. Login started if fields complete."}
-
-
-@app.get("/clients")
-def clients_rows():
-    rows: List[Dict[str, Any]] = []
-    for brk, folder in (("dhan", DHAN_DIR), ("motilal", MO_DIR)):
-        for fn in os.listdir(folder):
-            if not fn.endswith(".json"): continue
-            try:
-                with open(os.path.join(folder, fn), "r") as f: d = json.load(f)
-                rows.append({
-                    "name": d.get("name",""),
-                    "display_name": d.get("name",""),
-                    "client_id": d.get("userid",""),
-                    "capital": d.get("capital",""),
-                    "status": "logged_in" if d.get("session_active") else "logged_out",
-                    "session_active": bool(d.get("session_active", False)),
-                    "broker": brk
-                })
-            except: pass
-    return rows
-
-@app.get("/get_clients")
-def get_clients_legacy():
-    rows = clients_rows()
-    return {"clients": [
-        {"name": r["name"], "client_id": r["client_id"], "capital": r["capital"],
-         "session": "Logged in" if r["session_active"] else "Logged out"}
-        for r in rows
-    ]}
-@app.post("/delete_client")
-def delete_client(payload: Dict[str, Any] = Body(...)):
-    """
-    Delete one or many clients.
-
-    Accepts any of these shapes:
-    - { broker: 'motilal'|'dhan', client_id: 'WOIE1286' }
-    - { broker: 'motilal', userid: 'WOIE1286' }
-    - { items: [ { broker:'motilal', client_id:'WOIE1286' }, { broker:'dhan', userid:'123456' } ] }
-    - { broker:'motilal', userids:['WOIE1286','WOIE1284'] }
-
-    Returns a summary with deleted & missing arrays.
-    """
-    deleted, missing = [], []
-
-    # unify into a list of {broker, userid}
-    items: List[Dict[str, str]] = []
-    if "items" in payload and isinstance(payload["items"], list):
-        items = payload["items"]
-    elif "userids" in payload and isinstance(payload["userids"], list):
-        broker = (_pick(payload.get("broker")) or "").lower()
-        items = [{"broker": broker, "userid": u} for u in payload["userids"]]
-    else:
-        items = [payload]
-
-    # process
-    for it in items:
-        broker = (_pick(it.get("broker")) or "").lower()
-        userid = _pick(it.get("userid"), it.get("client_id"))
-        if not broker or not userid:
-            missing.append({"broker": broker, "userid": userid, "reason": "missing broker/userid"})
-            continue
-        if _delete_client_file(broker, userid):
-            deleted.append({"broker": broker, "userid": userid})
-        else:
-            missing.append({"broker": broker, "userid": userid, "reason": "not found"})
-
-    return {"success": True, "deleted": deleted, "missing": missing}
-
-
-@app.get("/debug/list_local_clients")
-def debug_local_clients():
-    result = {"motilal": [], "dhan": []}
-    for brk, folder in (("dhan", DHAN_DIR), ("motilal", MO_DIR)):
-        try:
-            for fn in os.listdir(folder):
-                if fn.endswith(".json"):
-                    result[brk].append(fn)
-        except Exception as e:
-            result[brk].append(f"Error: {e}")
-    return result
-
-
-
-@app.post("/add_group")
-def add_group(payload: Dict[str, Any] = Body(...)):
-    """
-    Save a group immediately. Minimal schema:
-      { name: str, multiplier: number, members: [{broker, userid}] }
-
-    File is stored as ./data/groups/<id>.json where <id> is name (safe) or provided id.
-    """
-    name = _pick(payload.get("name"))
-    if not name:
-        raise HTTPException(status_code=400, detail="group 'name' is required")
-
-    # allow caller to pass id; else use name
-    group_id = _pick(payload.get("id"), name)
-    try:
-        mult_raw = payload.get("multiplier", 1)
-        multiplier = float(mult_raw) if str(mult_raw).strip() else 1.0
-        if multiplier <= 0:
-            raise ValueError("multiplier must be > 0")
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid 'multiplier'")
-
-    raw_members = payload.get("members") or []
-    members: List[Dict[str, str]] = []
-    for m in raw_members:
-        broker = (_pick((m or {}).get("broker")) or "").lower()
-        userid = _pick((m or {}).get("userid"), (m or {}).get("client_id"))
-        if not broker or not userid:
-            # skip malformed rows quietly
-            continue
-        members.append({"broker": broker, "userid": userid})
-
-    if not members:
-        raise HTTPException(status_code=400, detail="at least one valid member is required")
-
-    doc = {
-        "id": _safe(group_id),
-        "name": name,
-        "multiplier": multiplier,
-        "members": members,
-    }
-
-    path = _group_path(doc["id"])
-    _save(path, doc)
-    return {"success": True, "group": doc}
-
-@app.get("/groups")
-def get_groups():
-    """
-    List all saved groups.
-    Returns:
-      { "groups": [ { id, name, multiplier, members: [{broker, userid}, ...] } ] }
-    """
-    try:
-        items = _list_groups()  # uses ./data/groups/*.json
-        # Ensure a stable shape for the UI
-        groups = [{
-            "id": g.get("id"),
-            "name": g.get("name"),
-            "multiplier": g.get("multiplier", 1),
-            "members": g.get("members", []),
-        } for g in items]
-        return {"groups": groups}
-    except Exception as e:
-        return {"groups": [], "error": str(e)}
-
-
-@app.get("/get_groups")
-def get_groups_alias():
-    return get_groups()   # the /groups handler
-
-@app.post("/edit_group")
-def edit_group(payload: Dict[str, Any] = Body(...)):
-    """
-    Update group fields. Accepts { id? | name, name?, multiplier?, members? }
-    Keeps file id stable (no rename); only updates content.
-    """
-    id_or_name = _pick(payload.get("id"), payload.get("name"))
-    if not id_or_name:
-        raise HTTPException(status_code=400, detail="group 'id' or 'name' is required")
-
-    path = _find_group_path(id_or_name)
-    if not path:
-        raise HTTPException(status_code=404, detail="group not found")
-
-    doc = _read_json(path) or {}
-    # name
-    if payload.get("name"):
-        doc["name"] = str(payload["name"]).strip()
-
-    # multiplier
-    if "multiplier" in payload:
-        try:
-            m = float(payload.get("multiplier", 1))
-            if m <= 0:
-                raise ValueError
-        except Exception:
-            raise HTTPException(status_code=400, detail="invalid 'multiplier'")
-        doc["multiplier"] = m
-
-    # members
-    if "members" in payload:
-        raw = payload.get("members") or []
-        members: List[Dict[str, str]] = []
-        for m in raw:
-            b = (_pick((m or {}).get("broker")) or "").lower()
-            u = _pick((m or {}).get("userid"), (m or {}).get("client_id"))
-            if b and u:
-                members.append({"broker": b, "userid": u})
-        if not members:
-            raise HTTPException(status_code=400, detail="at least one valid member is required")
-        doc["members"] = members
-
-    # ensure id present in doc
-    doc["id"] = doc.get("id") or os.path.splitext(os.path.basename(path))[0]
-
-    _save(path, doc)
-    return {"success": True, "group": doc}
-
-@app.post("/delete_group")
-def delete_group(payload: Dict[str, Any] = Body(...)):
-    """
-    Delete groups by ids and/or names.
-    Accepts: { ids: [..], names: [..] }
-    """
-    ids = payload.get("ids") or []
-    names = payload.get("names") or []
-    targets = [str(x) for x in (ids + names)]
-    if not targets:
-        raise HTTPException(status_code=400, detail="provide 'ids' or 'names'")
-
-    deleted: List[str] = []
-    for t in targets:
-        p = _find_group_path(t)
-        if p and os.path.exists(p):
-            try:
-                os.remove(p)
-                # replicate delete to GitHub
-                try:
-                    rel_path = os.path.relpath(p, BASE_DIR).replace("\\", "/")
-                    _github_file_delete(rel_path)
-                except Exception:
-                    pass
-                deleted.append(os.path.splitext(os.path.basename(p))[0])
-            except Exception:
-                # skip failures silently
-                pass
-
-    return {"success": True, "deleted": deleted}
-
-@app.get("/list_copytrading_setups")
-def list_copytrading_setups():
-    """Return all saved copy-trading setups."""
-    items: List[Dict[str, Any]] = []
-    try:
-        for fn in os.listdir(COPY_ROOT):
-            if not fn.endswith(".json"):
-                continue
-            path = os.path.join(COPY_ROOT, fn)
-            doc = _read_json(path)
-            if not isinstance(doc, dict):
-                continue
-            # ensure minimal fields
-            doc["id"] = doc.get("id") or os.path.splitext(fn)[0]
-            doc["name"] = doc.get("name") or doc["id"]
-            items.append(doc)
-    except FileNotFoundError:
-        pass
-    items.sort(key=lambda d: (d.get("name") or "").lower())
-    return {"setups": items}
-
-@app.post("/add_copy_setup")
-def add_copy_setup(payload=Body(...)):
-    return save_copytrading_setup(payload)
-
-@app.post("/edit_copy_setup")
-def edit_copy_setup(payload=Body(...)):
-    return save_copytrading_setup(payload)
-
-
-@app.post("/enable_copy")
-def enable_copy(payload: Dict[str, Any] = Body(...)):
-    """Enable copy-trading for given setup ids/names."""
-    return _set_copy_enabled(payload, True)
-
-@app.post("/disable_copy")
-def disable_copy(payload: Dict[str, Any] = Body(...)):
-    """Disable copy-trading for given setup ids/names."""
-    return _set_copy_enabled(payload, False)
-
-@app.post("/save_copytrading_setup")
-def save_copytrading_setup(payload: Dict[str, Any] = Body(...)):
-    """
-    Upsert a copy-trading setup.
-    Accepts either UI or generic keys:
-      {
-        id?: str,
-        name|setup_name: str,
-        master|master_account: str,
-        children|child_accounts: [str|{userid|client_id|id|value|account}],
-        multipliers?: { child: number },
-        enabled?: bool
-      }
-    """
-    name   = _pick(payload.get("name"),   payload.get("setup_name"))
-    master = _pick(payload.get("master"), payload.get("master_account"))
-    children = _extract_children(payload.get("children") or payload.get("child_accounts") or [])
-    # remove master if present in children
-    children = [c for c in children if c != master]
-
-    if not name or not master or not children:
-        raise HTTPException(status_code=400, detail="name, master, and children are required")
-
-    multipliers = _build_multipliers(children, payload.get("multipliers"))
-    enabled = bool(payload.get("enabled", False))
-
-    mode = "created"
-    doc: Dict[str, Any] = {}
-
-    # resolve update path by id or (fallback) by name
-    setup_id = _pick(payload.get("id"))
-    path = None
-    if setup_id:
-        path = _find_copy_path(setup_id)
-    if not path:
-        # try by name
-        path = _find_copy_path(name)
-
-    if path and os.path.exists(path):
-        # UPDATE
-        mode = "updated"
-        doc = _read_json(path) or {}
-        doc["name"] = name
-        doc["master"] = str(master)
-        doc["children"] = children
-        doc["multipliers"] = multipliers
-        if "enabled" in payload:
-            doc["enabled"] = enabled
-        doc["id"] = doc.get("id") or os.path.splitext(os.path.basename(path))[0]
-    else:
-        # CREATE
-        setup_id = setup_id or _unique_copy_id(name)
-        doc = {
-            "id": setup_id,
-            "name": name,
-            "master": str(master),
-            "children": children,
-            "multipliers": multipliers,
-            "enabled": enabled,
-        }
-        path = _copy_path(setup_id)
-
-    _save(path, doc)
-    return {"success": True, "mode": mode, "setup": doc}
-
-@app.post("/delete_copy_setup")
-def delete_copy_setup(payload: Dict[str, Any] = Body(...)):
-    """
-    Delete setups by ids and/or names.
-    Accepts: { ids: [..], names: [..], id?, name? }
-    """
-    ids = list(payload.get("ids") or [])
-    names = list(payload.get("names") or [])
-    if payload.get("id"):   ids.append(str(payload["id"]))
-    if payload.get("name"): names.append(str(payload["name"]))
-
-    targets = [str(x) for x in (ids + names)]
-    if not targets:
-        raise HTTPException(status_code=400, detail="provide 'ids' or 'names'")
-
-    deleted: list[str] = []
-    for t in targets:
-        p = _find_copy_path(t)
-        if p and os.path.exists(p):
-            try:
-                os.remove(p)
-                try:
-                    rel_path = os.path.relpath(p, BASE_DIR).replace("\\", "/")
-                    _github_file_delete(rel_path)
-                except Exception:
-                    pass
-                deleted.append(os.path.splitext(os.path.basename(p))[0])
-            except Exception:
-                pass
-
-    return {"success": True, "deleted": deleted}
-
-# Optional compatibility alias if your UI ever calls this older name
-@app.post("/delete_copytrading_setup")
-def delete_copytrading_setup(payload: Dict[str, Any] = Body(...)):
-    return delete_copy_setup(payload)  # re-use the same logic
-
-# put this helper near your other helpers
-def _guess_broker_from_order(order: Dict[str, Any]) -> str | None:
-    """
-    Decide broker using order_id shape first (safest), then fall back to name.
-    - Dhan orderId: digits only
-    - Motilal uniqueorderid: alphanumeric (letters present)
-    """
-    oid = str((order or {}).get("order_id", "")).strip()
-    if oid.isdigit():
-        return "dhan"
-    if any(c.isalpha() for c in oid):
-        return "motilal"
-    # fallback if unknown shape
-    return _broker_by_client_name((order or {}).get("name"))
-
-
-# ---- helper to locate which broker a name belongs to
-def _broker_by_client_name(name: str) -> str | None:
-    if not name:
-        return None
-    needle = str(name).strip().lower()
-    for brk, folder in (("dhan", DHAN_DIR), ("motilal", MO_DIR)):
-        try:
-            for fn in os.listdir(folder):
-                if not fn.endswith('.json'):
-                    continue
-                try:
-                    with open(os.path.join(folder, fn), 'r', encoding='utf-8') as f:
-                        d = json.load(f)
-                    nm = (d.get('name') or d.get('display_name') or '').strip().lower()
-                    if nm == needle:
-                        return brk
-                except Exception:
-                    continue
-        except FileNotFoundError:
-            pass
-    return None
-
+# @app.post("/add_client")
+# def add_client(background_tasks: BackgroundTasks, payload: Dict[str, Any] = Body(...)):
+#     broker = (_pick(payload.get("broker")) or "motilal").lower()
+#     if broker not in ("dhan", "motilal"):
+#         raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'")
+# 
+#     path = _save_minimal(broker, payload)
+#     background_tasks.add_task(_dispatch_login, broker, path)
+#     return {"success": True, "message": f"Saved for {broker}. Login started if fields complete."}
+# 
+# @app.post("/edit_client")
+# def edit_client(background_tasks: BackgroundTasks, payload: Dict[str, Any] = Body(...)):
+#     """
+#     Edits an existing client. Accepts the same payload shape as /add_client,
+#     plus optional original_broker/original_userid when renaming/moving.
+#     Saves, then triggers background login if required fields are present.
+#     """
+#     broker = (_pick(payload.get("broker")) or "motilal").lower()
+#     if broker not in ("dhan", "motilal"):
+#         raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'")
+# 
+#     path = _update_minimal(broker, payload)
+#     background_tasks.add_task(_dispatch_login, broker, path)
+#     return {"success": True, "message": f"Updated for {broker}. Login started if fields complete."}
+# 
+# 
+# @app.get("/clients")
+# def clients_rows():
+#     rows: List[Dict[str, Any]] = []
+#     for brk, folder in (("dhan", DHAN_DIR), ("motilal", MO_DIR)):
+#         for fn in os.listdir(folder):
+#             if not fn.endswith(".json"): continue
+#             try:
+#                 with open(os.path.join(folder, fn), "r") as f: d = json.load(f)
+#                 rows.append({
+#                     "name": d.get("name",""),
+#                     "display_name": d.get("name",""),
+#                     "client_id": d.get("userid",""),
+#                     "capital": d.get("capital",""),
+#                     "status": "logged_in" if d.get("session_active") else "logged_out",
+#                     "session_active": bool(d.get("session_active", False)),
+#                     "broker": brk
+#                 })
+#             except: pass
+#     return rows
+# 
+# @app.get("/get_clients")
+# def get_clients_legacy():
+#     rows = clients_rows()
+#     return {"clients": [
+#         {"name": r["name"], "client_id": r["client_id"], "capital": r["capital"],
+#          "session": "Logged in" if r["session_active"] else "Logged out"}
+#         for r in rows
+#     ]}
+# @app.post("/delete_client")
+# def delete_client(payload: Dict[str, Any] = Body(...)):
+#     """
+#     Delete one or many clients.
+# 
+#     Accepts any of these shapes:
+#     - { broker: 'motilal'|'dhan', client_id: 'WOIE1286' }
+#     - { broker: 'motilal', userid: 'WOIE1286' }
+#     - { items: [ { broker:'motilal', client_id:'WOIE1286' }, { broker:'dhan', userid:'123456' } ] }
+#     - { broker:'motilal', userids:['WOIE1286','WOIE1284'] }
+# 
+#     Returns a summary with deleted & missing arrays.
+#     """
+#     deleted, missing = [], []
+# 
+#     # unify into a list of {broker, userid}
+#     items: List[Dict[str, str]] = []
+#     if "items" in payload and isinstance(payload["items"], list):
+#         items = payload["items"]
+#     elif "userids" in payload and isinstance(payload["userids"], list):
+#         broker = (_pick(payload.get("broker")) or "").lower()
+#         items = [{"broker": broker, "userid": u} for u in payload["userids"]]
+#     else:
+#         items = [payload]
+# 
+#     # process
+#     for it in items:
+#         broker = (_pick(it.get("broker")) or "").lower()
+#         userid = _pick(it.get("userid"), it.get("client_id"))
+#         if not broker or not userid:
+#             missing.append({"broker": broker, "userid": userid, "reason": "missing broker/userid"})
+#             continue
+#         if _delete_client_file(broker, userid):
+#             deleted.append({"broker": broker, "userid": userid})
+#         else:
+#             missing.append({"broker": broker, "userid": userid, "reason": "not found"})
+# 
+#     return {"success": True, "deleted": deleted, "missing": missing}
+# 
+# 
+# @app.get("/debug/list_local_clients")
+# def debug_local_clients():
+#     result = {"motilal": [], "dhan": []}
+#     for brk, folder in (("dhan", DHAN_DIR), ("motilal", MO_DIR)):
+#         try:
+#             for fn in os.listdir(folder):
+#                 if fn.endswith(".json"):
+#                     result[brk].append(fn)
+#         except Exception as e:
+#             result[brk].append(f"Error: {e}")
+#     return result
+# 
+# 
+# 
+# @app.post("/add_group")
+# def add_group(payload: Dict[str, Any] = Body(...)):
+#     """
+#     Save a group immediately. Minimal schema:
+#       { name: str, multiplier: number, members: [{broker, userid}] }
+# 
+#     File is stored as ./data/groups/<id>.json where <id> is name (safe) or provided id.
+#     """
+#     name = _pick(payload.get("name"))
+#     if not name:
+#         raise HTTPException(status_code=400, detail="group 'name' is required")
+# 
+#     # allow caller to pass id; else use name
+#     group_id = _pick(payload.get("id"), name)
+#     try:
+#         mult_raw = payload.get("multiplier", 1)
+#         multiplier = float(mult_raw) if str(mult_raw).strip() else 1.0
+#         if multiplier <= 0:
+#             raise ValueError("multiplier must be > 0")
+#     except Exception:
+#         raise HTTPException(status_code=400, detail="invalid 'multiplier'")
+# 
+#     raw_members = payload.get("members") or []
+#     members: List[Dict[str, str]] = []
+#     for m in raw_members:
+#         broker = (_pick((m or {}).get("broker")) or "").lower()
+#         userid = _pick((m or {}).get("userid"), (m or {}).get("client_id"))
+#         if not broker or not userid:
+#             # skip malformed rows quietly
+#             continue
+#         members.append({"broker": broker, "userid": userid})
+# 
+#     if not members:
+#         raise HTTPException(status_code=400, detail="at least one valid member is required")
+# 
+#     doc = {
+#         "id": _safe(group_id),
+#         "name": name,
+#         "multiplier": multiplier,
+#         "members": members,
+#     }
+# 
+#     path = _group_path(doc["id"])
+#     _save(path, doc)
+#     return {"success": True, "group": doc}
+# 
+# @app.get("/groups")
+# def get_groups():
+#     """
+#     List all saved groups.
+#     Returns:
+#       { "groups": [ { id, name, multiplier, members: [{broker, userid}, ...] } ] }
+#     """
+#     try:
+#         items = _list_groups()  # uses ./data/groups/*.json
+#         # Ensure a stable shape for the UI
+#         groups = [{
+#             "id": g.get("id"),
+#             "name": g.get("name"),
+#             "multiplier": g.get("multiplier", 1),
+#             "members": g.get("members", []),
+#         } for g in items]
+#         return {"groups": groups}
+#     except Exception as e:
+#         return {"groups": [], "error": str(e)}
+# 
+# 
+# @app.get("/get_groups")
+# def get_groups_alias():
+#     return get_groups()   # the /groups handler
+# 
+# @app.post("/edit_group")
+# def edit_group(payload: Dict[str, Any] = Body(...)):
+#     """
+#     Update group fields. Accepts { id? | name, name?, multiplier?, members? }
+#     Keeps file id stable (no rename); only updates content.
+#     """
+#     id_or_name = _pick(payload.get("id"), payload.get("name"))
+#     if not id_or_name:
+#         raise HTTPException(status_code=400, detail="group 'id' or 'name' is required")
+# 
+#     path = _find_group_path(id_or_name)
+#     if not path:
+#         raise HTTPException(status_code=404, detail="group not found")
+# 
+#     doc = _read_json(path) or {}
+#     # name
+#     if payload.get("name"):
+#         doc["name"] = str(payload["name"]).strip()
+# 
+#     # multiplier
+#     if "multiplier" in payload:
+#         try:
+#             m = float(payload.get("multiplier", 1))
+#             if m <= 0:
+#                 raise ValueError
+#         except Exception:
+#             raise HTTPException(status_code=400, detail="invalid 'multiplier'")
+#         doc["multiplier"] = m
+# 
+#     # members
+#     if "members" in payload:
+#         raw = payload.get("members") or []
+#         members: List[Dict[str, str]] = []
+#         for m in raw:
+#             b = (_pick((m or {}).get("broker")) or "").lower()
+#             u = _pick((m or {}).get("userid"), (m or {}).get("client_id"))
+#             if b and u:
+#                 members.append({"broker": b, "userid": u})
+#         if not members:
+#             raise HTTPException(status_code=400, detail="at least one valid member is required")
+#         doc["members"] = members
+# 
+#     # ensure id present in doc
+#     doc["id"] = doc.get("id") or os.path.splitext(os.path.basename(path))[0]
+# 
+#     _save(path, doc)
+#     return {"success": True, "group": doc}
+# 
+# @app.post("/delete_group")
+# def delete_group(payload: Dict[str, Any] = Body(...)):
+#     """
+#     Delete groups by ids and/or names.
+#     Accepts: { ids: [..], names: [..] }
+#     """
+#     ids = payload.get("ids") or []
+#     names = payload.get("names") or []
+#     targets = [str(x) for x in (ids + names)]
+#     if not targets:
+#         raise HTTPException(status_code=400, detail="provide 'ids' or 'names'")
+# 
+#     deleted: List[str] = []
+#     for t in targets:
+#         p = _find_group_path(t)
+#         if p and os.path.exists(p):
+#             try:
+#                 os.remove(p)
+#                 # replicate delete to GitHub
+#                 try:
+#                     rel_path = os.path.relpath(p, BASE_DIR).replace("\\", "/")
+#                     _github_file_delete(rel_path)
+#                 except Exception:
+#                     pass
+#                 deleted.append(os.path.splitext(os.path.basename(p))[0])
+#             except Exception:
+#                 # skip failures silently
+#                 pass
+# 
+#     return {"success": True, "deleted": deleted}
+# 
+# @app.get("/list_copytrading_setups")
+# def list_copytrading_setups():
+#     """Return all saved copy-trading setups."""
+#     items: List[Dict[str, Any]] = []
+#     try:
+#         for fn in os.listdir(COPY_ROOT):
+#             if not fn.endswith(".json"):
+#                 continue
+#             path = os.path.join(COPY_ROOT, fn)
+#             doc = _read_json(path)
+#             if not isinstance(doc, dict):
+#                 continue
+#             # ensure minimal fields
+#             doc["id"] = doc.get("id") or os.path.splitext(fn)[0]
+#             doc["name"] = doc.get("name") or doc["id"]
+#             items.append(doc)
+#     except FileNotFoundError:
+#         pass
+#     items.sort(key=lambda d: (d.get("name") or "").lower())
+#     return {"setups": items}
+# 
+# @app.post("/add_copy_setup")
+# def add_copy_setup(payload=Body(...)):
+#     return save_copytrading_setup(payload)
+# 
+# @app.post("/edit_copy_setup")
+# def edit_copy_setup(payload=Body(...)):
+#     return save_copytrading_setup(payload)
+# 
+# 
+# @app.post("/enable_copy")
+# def enable_copy(payload: Dict[str, Any] = Body(...)):
+#     """Enable copy-trading for given setup ids/names."""
+#     return _set_copy_enabled(payload, True)
+# 
+# @app.post("/disable_copy")
+# def disable_copy(payload: Dict[str, Any] = Body(...)):
+#     """Disable copy-trading for given setup ids/names."""
+#     return _set_copy_enabled(payload, False)
+# 
+# @app.post("/save_copytrading_setup")
+# def save_copytrading_setup(payload: Dict[str, Any] = Body(...)):
+#     """
+#     Upsert a copy-trading setup.
+#     Accepts either UI or generic keys:
+#       {
+#         id?: str,
+#         name|setup_name: str,
+#         master|master_account: str,
+#         children|child_accounts: [str|{userid|client_id|id|value|account}],
+#         multipliers?: { child: number },
+#         enabled?: bool
+#       }
+#     """
+#     name   = _pick(payload.get("name"),   payload.get("setup_name"))
+#     master = _pick(payload.get("master"), payload.get("master_account"))
+#     children = _extract_children(payload.get("children") or payload.get("child_accounts") or [])
+#     # remove master if present in children
+#     children = [c for c in children if c != master]
+# 
+#     if not name or not master or not children:
+#         raise HTTPException(status_code=400, detail="name, master, and children are required")
+# 
+#     multipliers = _build_multipliers(children, payload.get("multipliers"))
+#     enabled = bool(payload.get("enabled", False))
+# 
+#     mode = "created"
+#     doc: Dict[str, Any] = {}
+# 
+#     # resolve update path by id or (fallback) by name
+#     setup_id = _pick(payload.get("id"))
+#     path = None
+#     if setup_id:
+#         path = _find_copy_path(setup_id)
+#     if not path:
+#         # try by name
+#         path = _find_copy_path(name)
+# 
+#     if path and os.path.exists(path):
+#         # UPDATE
+#         mode = "updated"
+#         doc = _read_json(path) or {}
+#         doc["name"] = name
+#         doc["master"] = str(master)
+#         doc["children"] = children
+#         doc["multipliers"] = multipliers
+#         if "enabled" in payload:
+#             doc["enabled"] = enabled
+#         doc["id"] = doc.get("id") or os.path.splitext(os.path.basename(path))[0]
+#     else:
+#         # CREATE
+#         setup_id = setup_id or _unique_copy_id(name)
+#         doc = {
+#             "id": setup_id,
+#             "name": name,
+#             "master": str(master),
+#             "children": children,
+#             "multipliers": multipliers,
+#             "enabled": enabled,
+#         }
+#         path = _copy_path(setup_id)
+# 
+#     _save(path, doc)
+#     return {"success": True, "mode": mode, "setup": doc}
+# 
+# @app.post("/delete_copy_setup")
+# def delete_copy_setup(payload: Dict[str, Any] = Body(...)):
+#     """
+#     Delete setups by ids and/or names.
+#     Accepts: { ids: [..], names: [..], id?, name? }
+#     """
+#     ids = list(payload.get("ids") or [])
+#     names = list(payload.get("names") or [])
+#     if payload.get("id"):   ids.append(str(payload["id"]))
+#     if payload.get("name"): names.append(str(payload["name"]))
+# 
+#     targets = [str(x) for x in (ids + names)]
+#     if not targets:
+#         raise HTTPException(status_code=400, detail="provide 'ids' or 'names'")
+# 
+#     deleted: list[str] = []
+#     for t in targets:
+#         p = _find_copy_path(t)
+#         if p and os.path.exists(p):
+#             try:
+#                 os.remove(p)
+#                 try:
+#                     rel_path = os.path.relpath(p, BASE_DIR).replace("\\", "/")
+#                     _github_file_delete(rel_path)
+#                 except Exception:
+#                     pass
+#                 deleted.append(os.path.splitext(os.path.basename(p))[0])
+#             except Exception:
+#                 pass
+# 
+#     return {"success": True, "deleted": deleted}
+# 
+# # Optional compatibility alias if your UI ever calls this older name
+# @app.post("/delete_copytrading_setup")
+# def delete_copytrading_setup(payload: Dict[str, Any] = Body(...)):
+#     return delete_copy_setup(payload)  # re-use the same logic
+# 
+# # put this helper near your other helpers
+# def _guess_broker_from_order(order: Dict[str, Any]) -> str | None:
+#     """
+#     Decide broker using order_id shape first (safest), then fall back to name.
+#     - Dhan orderId: digits only
+#     - Motilal uniqueorderid: alphanumeric (letters present)
+#     """
+#     oid = str((order or {}).get("order_id", "")).strip()
+#     if oid.isdigit():
+#         return "dhan"
+#     if any(c.isalpha() for c in oid):
+#         return "motilal"
+#     # fallback if unknown shape
+#     return _broker_by_client_name((order or {}).get("name"))
+# 
+# 
+# # ---- helper to locate which broker a name belongs to
+# def _broker_by_client_name(name: str) -> str | None:
+#     if not name:
+#         return None
+#     needle = str(name).strip().lower()
+#     for brk, folder in (("dhan", DHAN_DIR), ("motilal", MO_DIR)):
+#         try:
+#             for fn in os.listdir(folder):
+#                 if not fn.endswith('.json'):
+#                     continue
+#                 try:
+#                     with open(os.path.join(folder, fn), 'r', encoding='utf-8') as f:
+#                         d = json.load(f)
+#                     nm = (d.get('name') or d.get('display_name') or '').strip().lower()
+#                     if nm == needle:
+#                         return brk
+#                 except Exception:
+#                     continue
+#         except FileNotFoundError:
+#             pass
+#     return None
+# 
 @app.get('/get_orders')
 def route_get_orders():
     from collections import OrderedDict
@@ -1995,34 +1995,3 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
