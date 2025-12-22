@@ -12,8 +12,19 @@ import pandas as pd
 from auth.auth_router import get_current_user
 from auth.auth_router import router as auth_router
 
-app.include_router(auth_router, prefix="/auth", tags=["Auth"])
+app = FastAPI(title="Multi-broker Router")
 
+# ✅ THEN: middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ✅ THEN: include routers
+app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 
 
 
@@ -2002,6 +2013,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
