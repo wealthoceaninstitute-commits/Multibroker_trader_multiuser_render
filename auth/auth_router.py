@@ -7,7 +7,7 @@ from typing import Dict, Any
 from .auth_utils import hash_password, verify_password, create_token, decode_token
 from .github_store import github_read_json, github_write_json, github_list_dir
 
-router = APIRouter(prefix="/auth", tags=["Auth"])
+router = APIRouter(tags=["Auth"])
 
 DATA_ROOT = "data/users"
 
