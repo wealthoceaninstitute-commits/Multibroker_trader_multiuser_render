@@ -16,7 +16,11 @@ dhanhq>=2.0.2
 playwright==1.49.0
 pytest-playwright==0.5.2
 typing-extensions>=4.7.1
+cryptography==41.0.7
 python-jose[cryptography]
+passlib[bcrypt]
+
+
 
 
 
