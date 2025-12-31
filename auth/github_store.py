@@ -1,9 +1,9 @@
 import os, json, base64, requests
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_OWNER = os.getenv("GITHUB_REPO_OWNER")
-GITHUB_REPO  = os.getenv("GITHUB_REPO_NAME")
-BRANCH = "main"
+GITHUB_OWNER = os.getenv("GITHUB_REPO_OWNER", "wealthoceaninstitute-commits")
+GITHUB_REPO  = os.getenv("GITHUB_REPO_NAME", "Multiuser_clients")
+BRANCH = os.getenv("GITHUB_BRANCH", "main")
 
 def github_write_json(path: str, data: dict):
     url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{path}"
