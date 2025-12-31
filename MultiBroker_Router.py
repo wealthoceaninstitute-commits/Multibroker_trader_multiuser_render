@@ -39,6 +39,28 @@ def health():
     return {"status": "ok"}
 
 
+from fastapi import Request
+
+@app.middleware("http")
+async def debug_requests(request: Request, call_next):
+    print("---- DEBUG REQUEST ----")
+    print("Path:", request.url.path)
+    print("Method:", request.method)
+    print("Headers:", dict(request.headers))
+
+    try:
+        body = await request.body()
+        print("Raw body:", body)
+    except Exception as e:
+        print("Body read error:", e)
+
+    response = await call_next(request)
+    print("Response status:", response.status_code)
+    print("-----------------------")
+    return response
+
+
+
 
 STAT_KEYS = ["pending", "traded", "rejected", "cancelled", "others"]
 summary_data_global: Dict[str, Dict[str, Any]] = {}
@@ -1943,6 +1965,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
