@@ -14,12 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from auth.auth_router import router as auth_router
 
-# 1️⃣ CREATE app FIRST
-app = FastAPI(title="MultiBroker Router")
+# 1️⃣ Create the FastAPI app once
+app = FastAPI(title="Multi-broker Router")
 
-# 2️⃣ ADD middleware
-app = FastAPI(title="MultiBroker Router")
-
+# 2️⃣ Add CORS middleware.  Allow the deployed frontend origins plus a wildcard
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -27,13 +25,14 @@ app.add_middleware(
         "https://multibroker-trader.onrender.com",
         "https://multibrokertrader-production-b4e2.up.railway.app",
         "https://multibroker-trader-multiuser.vercel.app",
-        "*"
+        "*",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# 3️⃣ Include the authentication router.  This registers /auth/register and other routes
 app.include_router(auth_router)
 
 
