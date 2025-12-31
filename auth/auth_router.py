@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Body, HTTPException
 from datetime import datetime
 from typing import Dict, Any
-import hashlib
+import hashlib, json, os
+import requests
 
 from .github_store import github_write_json
 
@@ -40,5 +41,34 @@ def register(payload: Dict[str, Any] = Body(...)):
         )
     except Exception as e:
         # Log the error.  In production you might send this to a logger
+
+
         print("[auth] GitHub write failed:", e)
     return {"success": True}
+
+
+GITHUB_OWNER = os.getenv("GITHUB_REPO_OWNER", "wealthoceaninstitute-commits")
+GITHUB_REPO  = os.getenv("GITHUB_REPO_NAME", "Multiuser_clients")
+BRANCH = os.getenv("GITHUB_BRANCH", "main")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+
+def hash_pwd(p: str) -> str:
+    return hashlib.sha256(p.encode()).hexdigest()
+
+@router.post("/login")
+def login(username: str, password: str):
+    path = f"data/users/{username}/profile.json"
+    url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{BRANCH}/{path}"
+
+    r = requests.get(url, timeout=10)
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid login")
+
+    user = r.json()
+    if user["password"] != hash_pwd(password):
+        raise HTTPException(status_code=401, detail="Invalid login")
+
+    return {
+        "success": True,
+        "userid": username
+    }
