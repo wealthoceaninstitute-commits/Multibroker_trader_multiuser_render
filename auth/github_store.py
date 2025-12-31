@@ -46,4 +46,3 @@ def github_write_json(path: str, data: dict) -> None:
     r = requests.put(url, headers=headers, json=payload, timeout=15)
     if r.status_code not in (200, 201):
         raise Exception(f"GitHub write failed: {r.status_code} {r.text}")
-iled: {r.status_code} {r.text}")
