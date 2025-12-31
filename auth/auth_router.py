@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Dict, Any
 import hashlib, json, os
 import requests
+from fastapi import Body
 
 from .github_store import github_write_json
 
@@ -52,11 +53,15 @@ GITHUB_REPO  = os.getenv("GITHUB_REPO_NAME", "Multiuser_clients")
 BRANCH = os.getenv("GITHUB_BRANCH", "main")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
-def hash_pwd(p: str) -> str:
-    return hashlib.sha256(p.encode()).hexdigest()
 
 @router.post("/login")
-def login(username: str, password: str):
+def login(payload: Dict[str, Any] = Body(...)):
+    username = payload.get("username")
+    password = payload.get("password")
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password required")
+
     path = f"data/users/{username}/profile.json"
     url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{BRANCH}/{path}"
 
