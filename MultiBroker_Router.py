@@ -9,10 +9,15 @@ import threading
 import os, sqlite3, threading, requests
 from fastapi import Query
 import pandas as pd
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 from auth.auth_router import router as auth_router
 
+# 1️⃣ CREATE app FIRST
+app = FastAPI()
 
-# ✅ THEN: middleware
+# 2️⃣ ADD middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,8 +26,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ THEN: include routers
-app.include_router(auth_router, prefix="/auth", tags=["Auth"])
+# 3️⃣ INCLUDE routers
+app.include_router(auth_router)
+
+# 4️⃣ OPTIONAL health check
+@app.get("/")
+def health():
+    return {"status": "ok"}
 
 
 
@@ -2011,6 +2021,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
