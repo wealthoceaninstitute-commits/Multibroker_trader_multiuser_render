@@ -49,20 +49,7 @@ _symbol_db_lock = threading.Lock()
 
 
 
-def GH_HEADERS():
-    # Keep Accept header even if token missing (no-op mode)
-    h = {"Accept": "application/vnd.github+json"}
-    if GITHUB_TOKEN:
-        h["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    return h
-
-def GH_CONTENTS_URL(rel_path: str) -> str:
-    # GitHub needs forward slashes
-    rp = (rel_path or "").replace("\\", "/").lstrip("/")
-    return f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{rp}"
-
-
-
+# GitHub helper functions removed: GH_HEADERS, GH_CONTENTS_URL, _github_sync_dir, _github_sync_down_all
 # -------- Option B storage --------
 BASE_DIR = os.path.abspath(os.environ.get("DATA_DIR", "./data"))
 CLIENTS_ROOT = os.path.join(BASE_DIR, "clients")
@@ -101,56 +88,7 @@ def _read_json(path: str) -> Dict[str, Any]:
 # ---------- helpers ----------
 def _ensure_dirs():
     os.makedirs(os.path.dirname(SYMBOL_DB_PATH), exist_ok=True)
-def _github_sync_dir(rel_dir: str):
-    if not (GITHUB_OWNER and GITHUB_REPO):
-        return
-    url = f"{GH_CONTENTS_URL(rel_dir)}?ref={GITHUB_BRANCH}"
-
-    r = requests.get(url, headers=GH_HEADERS(), timeout=20)
-    if r.status_code != 200:
-        return
-
-    for item in r.json() or []:
-        if item.get("type") != "file":
-            continue
-        name = item.get("name", "")
-        if not name.lower().endswith(".json"):
-            continue
-
-        # fetch file content
-        dl = item.get("download_url")
-        if not dl:
-            # fallback via base64
-            f2 = requests.get(item.get("url"), headers=GH_HEADERS(), timeout=20)
-            if f2.status_code != 200:
-                continue
-            j = f2.json() or {}
-            b64 = j.get("content") or ""
-            try:
-                content = base64.b64decode(b64).decode("utf-8", "ignore")
-            except Exception:
-                continue
-        else:
-            f2 = requests.get(dl, timeout=30)
-            if f2.status_code != 200:
-                continue
-            content = f2.text
-
-        # write locally
-        local_path = os.path.join(BASE_DIR, rel_dir.replace("/", os.sep), name)
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        try:
-            with open(local_path, "w", encoding="utf-8") as f:
-                f.write(content)
-        except Exception:
-            pass
-
-
-def _github_sync_down_all():
-    for rel in ("clients/dhan", "clients/motilal", "groups", "copy_setups"):
-        _github_sync_dir(rel)
-
-
+# GitHub helper functions removed: GH_HEADERS, GH_CONTENTS_URL, _github_sync_dir, _github_sync_down_all
 # === GitHub persistence helpers ===
 def _github_file_write(rel_path: str, content: str) -> None:
     """
@@ -2005,17 +1943,6 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
-
-
-
-
-
-
-
-
-
-
-
 
 
 
