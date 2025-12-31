@@ -54,14 +54,12 @@ BRANCH = os.getenv("GITHUB_BRANCH", "main")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 
+
 @router.post("/login")
-def login(payload: Dict[str, Any] = Body(...)):
-    username = payload.get("username")
-    password = payload.get("password")
-
-    if not username or not password:
-        raise HTTPException(status_code=400, detail="Username and password required")
-
+def login(
+    username: str = Form(...),
+    password: str = Form(...)
+):
     path = f"data/users/{username}/profile.json"
     url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{BRANCH}/{path}"
 
