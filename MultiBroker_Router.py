@@ -18,16 +18,24 @@ from auth.auth_router import router as auth_router
 app = FastAPI(title="MultiBroker Router")
 
 # 2️⃣ ADD middleware
+app = FastAPI(title="MultiBroker Router")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://multibrokertrader-production.up.railway.app",
+        "https://multibroker-trader.onrender.com",
+        "https://multibrokertrader-production-b4e2.up.railway.app",
+        "https://multibroker-trader-multiuser.vercel.app",
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 3️⃣ INCLUDE routers
 app.include_router(auth_router)
+
 
 # 4️⃣ OPTIONAL health check
 @app.get("/")
@@ -74,19 +82,6 @@ MO_DIR       = os.path.join(CLIENTS_ROOT, "motilal")
 os.makedirs(DHAN_DIR, exist_ok=True)
 os.makedirs(MO_DIR,   exist_ok=True)
 
-app = FastAPI(title="Multi-broker Router")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://multibrokertrader-production.up.railway.app",
-        "https://multibroker-trader.onrender.com",
-        "https://multibrokertrader-production-b4e2.up.railway.app",
-        "https://multibroker-trader-multiuser.vercel.app"
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 # --- Groups storage (simple) ---
@@ -2021,6 +2016,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
