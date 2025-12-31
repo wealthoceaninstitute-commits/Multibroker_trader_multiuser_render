@@ -21,9 +21,6 @@ app = FastAPI(title="Multi-broker Router")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://multibrokertrader-production.up.railway.app",
-        "https://multibroker-trader.onrender.com",
-        "https://multibrokertrader-production-b4e2.up.railway.app",
         "https://multibroker-trader-multiuser.vercel.app",
         "*",
     ],
@@ -2015,6 +2012,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
