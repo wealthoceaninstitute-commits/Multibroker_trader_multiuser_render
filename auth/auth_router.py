@@ -60,6 +60,9 @@ def login(
     username: str = Form(...),
     password: str = Form(...)
 ):
+    print("LOGIN HIT")
+    print("username:", username)
+    print("password:", password)
     path = f"data/users/{username}/profile.json"
     url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{BRANCH}/{path}"
 
