@@ -55,14 +55,20 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 
 
+from fastapi import APIRouter, Body, HTTPException
+from typing import Dict
+import hashlib, requests, os
+
 @router.post("/login")
-def login(
-    username: str = Form(...),
-    password: str = Form(...)
-):
-    print("LOGIN HIT")
-    print("username:", username)
-    print("password:", password)
+def login(payload: Dict = Body(...)):
+    print("LOGIN HIT payload:", payload)
+
+    username = payload.get("userid") or payload.get("username")
+    password = payload.get("password")
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Missing credentials")
+
     path = f"data/users/{username}/profile.json"
     url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{BRANCH}/{path}"
 
@@ -71,7 +77,7 @@ def login(
         raise HTTPException(status_code=401, detail="Invalid login")
 
     user = r.json()
-    if user["password"] != hash_pwd(password):
+    if user["password"] != hashlib.sha256(password.encode()).hexdigest():
         raise HTTPException(status_code=401, detail="Invalid login")
 
     return {
