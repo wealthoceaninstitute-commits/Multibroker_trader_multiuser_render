@@ -716,47 +716,54 @@ def health():
 def add_client(
     background_tasks: BackgroundTasks,
     payload: Dict[str, Any] = Body(...),
-    user_id: str = Header(..., alias="X-User-Id")
+    user_id: str = Header(..., alias="X-User-Id"),
 ):
     """
-    Register a new client for the authenticated user.  The caller must
-    specify a broker ("dhan" or "motilal"), the client's unique
-    identifier (`client_id` or `userid`), and any credential fields.
+    Adds a broker client under the logged-in user.
 
-    The user identity is supplied via the `X-User-Id` header.  Each
-    client's file is stored in `data/users/<user>/clients/<broker>/<user>_<client>.json`.
-    After persisting the client, a background login is triggered so
-    `session_active` reflects the current status.
+    Header:
+        X-User-Id
+
+    Saves to:
+        data/users/<user>/clients/<broker>/<user>_<clientid>.json
     """
+
     if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+        raise HTTPException(400, "Missing X-User-Id header")
 
     broker = (_pick(payload.get("broker")) or "motilal").lower()
     if broker not in ("dhan", "motilal"):
-        raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'")
+        raise HTTPException(400, f"Unsupported broker: {broker}")
 
-    # Determine client identifier (per broker)
     client_id = _pick(payload.get("client_id"), payload.get("userid"))
     if not client_id:
-        raise HTTPException(status_code=400, detail="client_id / userid is required")
+        raise HTTPException(400, "client_id / userid required")
+
     name = _pick(payload.get("name"), payload.get("display_name"), client_id)
 
-    # Build minimal doc based on broker
+    # -------------------------
+    # Broker-specific payload
+    # -------------------------
+
     if broker == "dhan":
         doc = {
+            "broker": "dhan",
             "userid": client_id,
             "name": name,
             "mobile": _pick(payload.get("mobile"), payload.get("mobile_number")),
-            "pin": _pick(payload.get("pin")),
-            "apikey": _pick(payload.get("apikey")),
-            "api_secret": _pick(payload.get("api_secret")),
-            "totpkey": _pick(payload.get("totpkey")),
+            "pin": payload.get("pin"),
+            "apikey": payload.get("apikey"),
+            "api_secret": payload.get("api_secret"),
+            "totpkey": payload.get("totpkey"),
             "capital": payload.get("capital", ""),
             "session_active": False,
+            "created_at": datetime.utcnow().isoformat(),
         }
+
     else:  # motilal
         creds = payload.get("creds") or {}
         doc = {
+            "broker": "motilal",
             "userid": client_id,
             "name": name,
             "password": _pick(payload.get("password"), creds.get("password")),
@@ -765,15 +772,24 @@ def add_client(
             "totpkey": _pick(payload.get("totpkey"), creds.get("totpkey")),
             "capital": payload.get("capital", ""),
             "session_active": False,
+            "created_at": datetime.utcnow().isoformat(),
         }
 
-    # Determine path and persist
+    # -------------------------
+    # Persist + login
+    # -------------------------
+
     path = _user_client_path(user_id, broker, client_id)
     _save(path, doc)
-    # Trigger login in the background
+
     background_tasks.add_task(_dispatch_login, broker, path)
-    return {"success": True, "message": f"Saved for {broker}. Login started if fields complete."}
-# 
+
+    return {
+        "success": True,
+        "broker": broker,
+        "client_id": client_id,
+        "message": "Client saved. Login triggered if credentials are valid.",
+    }
 @app.post("/clients/edit")
 def edit_client(
     background_tasks: BackgroundTasks,
@@ -2184,6 +2200,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
