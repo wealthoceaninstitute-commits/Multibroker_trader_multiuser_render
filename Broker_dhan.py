@@ -8,6 +8,10 @@ STAT_KEYS = ["pending", "traded", "rejected", "cancelled", "others"]
 
 # use same DATA_DIR as router
 BASE_DIR    = os.path.abspath(os.environ.get("DATA_DIR", "./data"))
+
+# Legacy location for Dhan clients (pre multi‑user).  This directory
+# remains for backwards compatibility but is no longer populated for
+# new users.  New clients are stored under data/users/<user>/clients/dhan.
 CLIENTS_DIR = os.path.join(BASE_DIR, "clients", "dhan")
 
 
@@ -15,16 +19,47 @@ CLIENTS_DIR = os.path.join(BASE_DIR, "clients", "dhan")
 # helpers
 # ---------------------------
 def _read_clients() -> List[Dict[str, Any]]:
+    """
+    Load all Dhan clients from both the legacy directory and the
+    new multi‑user directories.
+
+    This helper will aggregate every JSON file found in
+    - ./data/clients/dhan (legacy flat storage)
+    - ./data/users/<user>/clients/dhan (per‑user storage)
+
+    Returns a list of client dictionaries.
+    """
     items: List[Dict[str, Any]] = []
+    # 1. Read from legacy flat directory
     try:
         for fn in os.listdir(CLIENTS_DIR):
             if not fn.endswith(".json"):
                 continue
+            path = os.path.join(CLIENTS_DIR, fn)
             try:
-                with open(os.path.join(CLIENTS_DIR, fn), "r", encoding="utf-8") as f:
+                with open(path, "r", encoding="utf-8") as f:
                     items.append(json.load(f))
             except Exception:
                 pass
+    except FileNotFoundError:
+        pass
+    # 2. Read from per‑user directories
+    users_root = os.path.join(BASE_DIR, "users")
+    try:
+        for user in os.listdir(users_root):
+            broker_dir = os.path.join(users_root, user, "clients", "dhan")
+            try:
+                for fn in os.listdir(broker_dir):
+                    if not fn.endswith(".json"):
+                        continue
+                    path = os.path.join(broker_dir, fn)
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            items.append(json.load(f))
+                    except Exception:
+                        pass
+            except FileNotFoundError:
+                continue
     except FileNotFoundError:
         pass
     return items
@@ -866,18 +901,3 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
