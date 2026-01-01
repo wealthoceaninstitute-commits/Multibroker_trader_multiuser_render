@@ -1,7 +1,7 @@
 # MultiBroker_Router.py
 import os, json, importlib, base64
 from typing import Any, Dict, List,Optional
-from fastapi import FastAPI, Body, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Body, BackgroundTasks, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from collections import OrderedDict
 import importlib, os, time
@@ -74,11 +74,52 @@ _symbol_db_lock = threading.Lock()
 # GitHub helper functions removed: GH_HEADERS, GH_CONTENTS_URL, _github_sync_dir, _github_sync_down_all
 # -------- Option B storage --------
 BASE_DIR = os.path.abspath(os.environ.get("DATA_DIR", "./data"))
+
+"""
+In the original design clients for each broker were stored under
+./data/clients/<broker>/<client_id>.json.
+
+This router has been upgraded for multi‑user support.  Client
+credentials are now stored under a per‑user directory:
+    data/users/<userid>/clients/<broker>/<userid>_<client_id>.json
+
+`_user_clients_root(user)` returns the base directory for a given
+user, and `_user_client_path(user, broker, client_id)` returns the
+full path for that client.
+
+Old variables DHAN_DIR/MO_DIR are kept for backwards compatibility
+with any residual logic but are no longer used by the add/edit client
+routes.  They still point to the legacy locations to avoid breaking
+other parts of the code that might still reference them.
+"""
+
 CLIENTS_ROOT = os.path.join(BASE_DIR, "clients")
+
+# Legacy directories (unused in new user‑aware endpoints)
 DHAN_DIR     = os.path.join(CLIENTS_ROOT, "dhan")
 MO_DIR       = os.path.join(CLIENTS_ROOT, "motilal")
 os.makedirs(DHAN_DIR, exist_ok=True)
 os.makedirs(MO_DIR,   exist_ok=True)
+
+# New per‑user storage helper functions
+USERS_ROOT = os.path.join(BASE_DIR, "users")
+os.makedirs(USERS_ROOT, exist_ok=True)
+
+def _user_clients_root(user_id: str) -> str:
+    """Return the absolute path to a user's clients directory."""
+    safe_user = _safe(user_id)
+    return os.path.join(USERS_ROOT, safe_user, "clients")
+
+def _user_client_path(user_id: str, broker: str, client_id: str) -> str:
+    """Return the full path for a particular client's json.
+
+    The file is named `<userid>_<client_id>.json` inside the
+    broker‑specific subdirectory.
+    """
+    safe_user   = _safe(user_id)
+    safe_client = _safe(client_id)
+    folder = os.path.join(_user_clients_root(user_id), broker.lower())
+    return os.path.join(folder, f"{safe_user}_{safe_client}.json")
 
 
 
@@ -671,98 +712,276 @@ def health():
             status[key] = f"error: {e}"
     return {"ok": True, "brokers": status}
 
-# @app.post("/add_client")
-# def add_client(background_tasks: BackgroundTasks, payload: Dict[str, Any] = Body(...)):
-#     broker = (_pick(payload.get("broker")) or "motilal").lower()
-#     if broker not in ("dhan", "motilal"):
-#         raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'")
+@app.post("/clients/add")
+def add_client(
+    background_tasks: BackgroundTasks,
+    payload: Dict[str, Any] = Body(...),
+    user_id: str = Header(..., alias="X-User-Id")
+):
+    """
+    Register a new client for the authenticated user.  The caller must
+    specify a broker ("dhan" or "motilal"), the client's unique
+    identifier (`client_id` or `userid`), and any credential fields.
+
+    The user identity is supplied via the `X-User-Id` header.  Each
+    client's file is stored in `data/users/<user>/clients/<broker>/<user>_<client>.json`.
+    After persisting the client, a background login is triggered so
+    `session_active` reflects the current status.
+    """
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+
+    broker = (_pick(payload.get("broker")) or "motilal").lower()
+    if broker not in ("dhan", "motilal"):
+        raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'")
+
+    # Determine client identifier (per broker)
+    client_id = _pick(payload.get("client_id"), payload.get("userid"))
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id / userid is required")
+    name = _pick(payload.get("name"), payload.get("display_name"), client_id)
+
+    # Build minimal doc based on broker
+    if broker == "dhan":
+        doc = {
+            "userid": client_id,
+            "name": name,
+            "mobile": _pick(payload.get("mobile"), payload.get("mobile_number")),
+            "pin": _pick(payload.get("pin")),
+            "apikey": _pick(payload.get("apikey")),
+            "api_secret": _pick(payload.get("api_secret")),
+            "totpkey": _pick(payload.get("totpkey")),
+            "capital": payload.get("capital", ""),
+            "session_active": False,
+        }
+    else:  # motilal
+        creds = payload.get("creds") or {}
+        doc = {
+            "userid": client_id,
+            "name": name,
+            "password": _pick(payload.get("password"), creds.get("password")),
+            "pan": _pick(payload.get("pan"), creds.get("pan")),
+            "apikey": _pick(payload.get("apikey"), creds.get("apikey")),
+            "totpkey": _pick(payload.get("totpkey"), creds.get("totpkey")),
+            "capital": payload.get("capital", ""),
+            "session_active": False,
+        }
+
+    # Determine path and persist
+    path = _user_client_path(user_id, broker, client_id)
+    _save(path, doc)
+    # Trigger login in the background
+    background_tasks.add_task(_dispatch_login, broker, path)
+    return {"success": True, "message": f"Saved for {broker}. Login started if fields complete."}
 # 
-#     path = _save_minimal(broker, payload)
-#     background_tasks.add_task(_dispatch_login, broker, path)
-#     return {"success": True, "message": f"Saved for {broker}. Login started if fields complete."}
+@app.post("/clients/edit")
+def edit_client(
+    background_tasks: BackgroundTasks,
+    payload: Dict[str, Any] = Body(...),
+    user_id: str = Header(..., alias="X-User-Id"),
+):
+    """
+    Edit an existing client for the authenticated user.  Accepts the
+    same payload shape as `/clients/add`, plus optional
+    `original_broker`/`original_userid` (or old_broker/old_userid) when
+    renaming or moving a client.  Fields left blank will preserve
+    existing values.  After saving, a background login is triggered.
+    """
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+
+    broker = (_pick(payload.get("broker")) or "motilal").lower()
+    if broker not in ("dhan", "motilal"):
+        raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'")
+
+    # Determine the old identifiers (for rename/move)
+    old_client_id = _pick(payload.get("original_userid"), payload.get("old_userid"))
+    old_broker    = (_pick(payload.get("original_broker"), payload.get("old_broker")) or broker).lower()
+
+    # Determine new identifiers
+    client_id = _pick(payload.get("client_id"), payload.get("userid"), old_client_id)
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id / userid is required for edit")
+    name      = _pick(payload.get("name"), payload.get("display_name"), client_id)
+
+    # Resolve old and new paths
+    old_path = None
+    if old_client_id:
+        old_path = _user_client_path(user_id, old_broker, old_client_id)
+    new_path = _user_client_path(user_id, broker, client_id)
+
+    # Load existing data (prefer old if exists, otherwise new)
+    existing: Dict[str, Any] = {}
+    try:
+        if old_path and os.path.exists(old_path):
+            existing = _load(old_path)
+        elif os.path.exists(new_path):
+            existing = _load(new_path)
+    except Exception:
+        existing = {}
+
+    # Merge fields by broker
+    if broker == "dhan":
+        doc = {
+            "userid": client_id,
+            "name": _pick(name, existing.get("name")),
+            "mobile": _pick(
+                payload.get("mobile"),
+                payload.get("mobile_number"),
+                existing.get("mobile"),
+            ),
+            "pin": _pick(payload.get("pin"), existing.get("pin")),
+            "apikey": _pick(payload.get("apikey"), existing.get("apikey")),
+            "api_secret": _pick(payload.get("api_secret"), existing.get("api_secret")),
+            "totpkey": _pick(payload.get("totpkey"), existing.get("totpkey")),
+            "capital": payload.get("capital", existing.get("capital")),
+            "session_active": existing.get("session_active", False),
+        }
+    else:
+        creds = payload.get("creds") or {}
+        doc = {
+            "userid": client_id,
+            "name": _pick(name, existing.get("name")),
+            "password": _pick(
+                payload.get("password"),
+                creds.get("password"),
+                existing.get("password"),
+            ),
+            "pan": _pick(
+                payload.get("pan"),
+                creds.get("pan"),
+                existing.get("pan"),
+            ),
+            "apikey": _pick(
+                payload.get("apikey"),
+                creds.get("apikey"),
+                existing.get("apikey"),
+            ),
+            "totpkey": _pick(
+                payload.get("totpkey"),
+                creds.get("totpkey"),
+                existing.get("totpkey"),
+            ),
+            "capital": payload.get("capital", existing.get("capital")),
+            "session_active": existing.get("session_active", False),
+        }
+
+    # Write new file
+    _save(new_path, doc)
+    # If moved/renamed, remove the old file
+    if old_path and os.path.abspath(old_path) != os.path.abspath(new_path):
+        try:
+            if os.path.exists(old_path):
+                os.remove(old_path)
+        except Exception:
+            pass
+    # Trigger login
+    background_tasks.add_task(_dispatch_login, broker, new_path)
+    return {"success": True, "message": f"Updated for {broker}. Login started if fields complete."}
 # 
-# @app.post("/edit_client")
-# def edit_client(background_tasks: BackgroundTasks, payload: Dict[str, Any] = Body(...)):
-#     """
-#     Edits an existing client. Accepts the same payload shape as /add_client,
-#     plus optional original_broker/original_userid when renaming/moving.
-#     Saves, then triggers background login if required fields are present.
-#     """
-#     broker = (_pick(payload.get("broker")) or "motilal").lower()
-#     if broker not in ("dhan", "motilal"):
-#         raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'")
 # 
-#     path = _update_minimal(broker, payload)
-#     background_tasks.add_task(_dispatch_login, broker, path)
-#     return {"success": True, "message": f"Updated for {broker}. Login started if fields complete."}
+@app.get("/clients")
+def clients_rows(user_id: str = Header(..., alias="X-User-Id")):
+    """
+    List all clients for the authenticated user.  Each row contains
+    minimal client details used by the UI.  Clients are loaded from
+    `data/users/<user>/clients/<broker>`.
+    """
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    rows: List[Dict[str, Any]] = []
+    for broker in ("dhan", "motilal"):
+        folder = os.path.join(_user_clients_root(user_id), broker)
+        try:
+            for fn in os.listdir(folder):
+                if not fn.endswith(".json"):
+                    continue
+                path = os.path.join(folder, fn)
+                try:
+                    d = _load(path)
+                    rows.append({
+                        "name": d.get("name", ""),
+                        "display_name": d.get("name", ""),
+                        "client_id": d.get("userid", ""),
+                        "capital": d.get("capital", ""),
+                        "status": "logged_in" if d.get("session_active") else "logged_out",
+                        "session_active": bool(d.get("session_active", False)),
+                        "broker": broker,
+                    })
+                except Exception:
+                    pass
+        except FileNotFoundError:
+            continue
+    return rows
 # 
-# 
-# @app.get("/clients")
-# def clients_rows():
-#     rows: List[Dict[str, Any]] = []
-#     for brk, folder in (("dhan", DHAN_DIR), ("motilal", MO_DIR)):
-#         for fn in os.listdir(folder):
-#             if not fn.endswith(".json"): continue
-#             try:
-#                 with open(os.path.join(folder, fn), "r") as f: d = json.load(f)
-#                 rows.append({
-#                     "name": d.get("name",""),
-#                     "display_name": d.get("name",""),
-#                     "client_id": d.get("userid",""),
-#                     "capital": d.get("capital",""),
-#                     "status": "logged_in" if d.get("session_active") else "logged_out",
-#                     "session_active": bool(d.get("session_active", False)),
-#                     "broker": brk
-#                 })
-#             except: pass
-#     return rows
-# 
-# @app.get("/get_clients")
-# def get_clients_legacy():
-#     rows = clients_rows()
-#     return {"clients": [
-#         {"name": r["name"], "client_id": r["client_id"], "capital": r["capital"],
-#          "session": "Logged in" if r["session_active"] else "Logged out"}
-#         for r in rows
-#     ]}
-# @app.post("/delete_client")
-# def delete_client(payload: Dict[str, Any] = Body(...)):
-#     """
-#     Delete one or many clients.
-# 
-#     Accepts any of these shapes:
-#     - { broker: 'motilal'|'dhan', client_id: 'WOIE1286' }
-#     - { broker: 'motilal', userid: 'WOIE1286' }
-#     - { items: [ { broker:'motilal', client_id:'WOIE1286' }, { broker:'dhan', userid:'123456' } ] }
-#     - { broker:'motilal', userids:['WOIE1286','WOIE1284'] }
-# 
-#     Returns a summary with deleted & missing arrays.
-#     """
-#     deleted, missing = [], []
-# 
-#     # unify into a list of {broker, userid}
-#     items: List[Dict[str, str]] = []
-#     if "items" in payload and isinstance(payload["items"], list):
-#         items = payload["items"]
-#     elif "userids" in payload and isinstance(payload["userids"], list):
-#         broker = (_pick(payload.get("broker")) or "").lower()
-#         items = [{"broker": broker, "userid": u} for u in payload["userids"]]
-#     else:
-#         items = [payload]
-# 
-#     # process
-#     for it in items:
-#         broker = (_pick(it.get("broker")) or "").lower()
-#         userid = _pick(it.get("userid"), it.get("client_id"))
-#         if not broker or not userid:
-#             missing.append({"broker": broker, "userid": userid, "reason": "missing broker/userid"})
-#             continue
-#         if _delete_client_file(broker, userid):
-#             deleted.append({"broker": broker, "userid": userid})
-#         else:
-#             missing.append({"broker": broker, "userid": userid, "reason": "not found"})
-# 
-#     return {"success": True, "deleted": deleted, "missing": missing}
+@app.get("/get_clients")
+def get_clients_legacy(user_id: str = Header(..., alias="X-User-Id")):
+    """
+    Legacy endpoint to support old UI format.  Returns a list of
+    clients with simplified fields.
+    """
+    rows = clients_rows(user_id)  # reuse new implementation
+    return {"clients": [
+        {
+            "name": r["name"],
+            "client_id": r["client_id"],
+            "capital": r["capital"],
+            "session": "Logged in" if r["session_active"] else "Logged out",
+        }
+        for r in rows
+    ]}
+@app.post("/clients/delete")
+def delete_client(
+    payload: Dict[str, Any] = Body(...),
+    user_id: str = Header(..., alias="X-User-Id"),
+):
+    """
+    Delete one or more clients for the authenticated user.
+
+    Accepts any of these shapes:
+    - { broker: 'motilal'|'dhan', client_id: 'WOIE1286' }
+    - { broker: 'motilal', userid: 'WOIE1286' }
+    - { items: [ { broker:'motilal', client_id:'WOIE1286' }, { broker:'dhan', userid:'123456' } ] }
+    - { broker:'motilal', userids:['WOIE1286','WOIE1284'] }
+
+    Returns a summary with deleted & missing arrays.
+    """
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    deleted, missing = [], []
+
+    # unify into a list of {broker, client_id}
+    items: List[Dict[str, str]] = []
+    if "items" in payload and isinstance(payload["items"], list):
+        items = payload["items"]
+    elif "userids" in payload and isinstance(payload["userids"], list):
+        broker = (_pick(payload.get("broker")) or "").lower()
+        items = [{"broker": broker, "client_id": u} for u in payload["userids"]]
+    else:
+        items = [payload]
+
+    for it in items:
+        broker    = (_pick(it.get("broker")) or "").lower()
+        client_id = _pick(it.get("client_id"), it.get("userid"))
+        if not broker or not client_id:
+            missing.append({"broker": broker, "client_id": client_id, "reason": "missing broker/client_id"})
+            continue
+        path = _user_client_path(user_id, broker, client_id)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                # Remove from GitHub as well
+                try:
+                    rel_path = os.path.relpath(path, BASE_DIR).replace("\\", "/")
+                    _github_file_delete(rel_path)
+                except Exception:
+                    pass
+                deleted.append({"broker": broker, "client_id": client_id})
+            else:
+                missing.append({"broker": broker, "client_id": client_id, "reason": "not found"})
+        except Exception as e:
+            missing.append({"broker": broker, "client_id": client_id, "reason": str(e)})
+    return {"success": True, "deleted": deleted, "missing": missing}
 # 
 # 
 # @app.get("/debug/list_local_clients")
