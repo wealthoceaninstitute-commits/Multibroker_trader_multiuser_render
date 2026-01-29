@@ -106,20 +106,31 @@ USERS_ROOT = os.path.join(BASE_DIR, "users")
 os.makedirs(USERS_ROOT, exist_ok=True)
 
 def _user_clients_root(user_id: str) -> str:
-    """Return the absolute path to a user's clients directory."""
+    """
+    Absolute path to a user's clients directory.
+
+    data/users/<user>/clients
+    """
     safe_user = _safe(user_id)
     return os.path.join(USERS_ROOT, safe_user, "clients")
 
-def _user_client_path(user_id: str, broker: str, client_id: str) -> str:
-    """Return the full path for a particular client's json.
 
-    The file is named `<userid>_<client_id>.json` inside the
-    broker‑specific subdirectory.
+def _user_client_path(user_id: str, broker: str, client_id: str) -> str:
+    """
+    Absolute path to a specific client JSON file.
+
+    Final structure:
+    data/users/<user>/clients/<broker>/<client_id>.json
     """
     safe_user   = _safe(user_id)
+    safe_broker = _safe(broker).lower()
     safe_client = _safe(client_id)
-    folder = os.path.join(_user_clients_root(user_id), broker.lower())
-    return os.path.join(folder, f"{safe_user}_{safe_client}.json")
+
+    folder = os.path.join(USERS_ROOT, safe_user, "clients", safe_broker)
+    os.makedirs(folder, exist_ok=True)
+
+    return os.path.join(folder, f"{safe_client}.json")
+
 
 
 
@@ -2200,6 +2211,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
