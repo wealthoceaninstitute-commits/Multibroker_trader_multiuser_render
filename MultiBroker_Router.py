@@ -1,7 +1,7 @@
 # MultiBroker_Router.py
 import os, json, importlib, base64
 from typing import Any, Dict, List,Optional
-from fastapi import FastAPI, Body, BackgroundTasks, HTTPException, Header
+from fastapi import FastAPI, Body, BackgroundTasks, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from collections import OrderedDict
 import importlib, os, time
@@ -859,6 +859,12 @@ def add_client(
         "client_id": client_id,
         "message": "Client saved. Login triggered if credentials are valid.",
     }
+
+@app.post("/add_client")
+def add_client_legacy(payload: Dict[str, Any] = Body(...)):
+    """Legacy alias for older frontend which posts to /add_client."""
+    return add_client(payload)
+
 @app.post("/clients/edit")
 def edit_client(
     background_tasks: BackgroundTasks,
@@ -872,8 +878,9 @@ def edit_client(
     renaming or moving a client.  Fields left blank will preserve
     existing values.  After saving, a background login is triggered.
     """
+    user_id = (user_id or user_id_q or "").strip().lower()
     if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+        return []
 
     broker = (_pick(payload.get("broker")) or "motilal").lower()
     if broker not in ("dhan", "motilal"):
@@ -972,8 +979,9 @@ def clients_rows(user_id: str = Header(..., alias="X-User-Id")):
     minimal client details used by the UI.  Clients are loaded from
     `data/users/<user>/clients/<broker>`.
     """
+    user_id = (user_id or user_id_q or "").strip().lower()
     if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+        return {"clients": []}
     rows: List[Dict[str, Any]] = []
     for broker in ("dhan", "motilal"):
         folder = os.path.join(_user_clients_root(user_id), broker)
@@ -2275,3 +2283,48 @@ if __name__ == "__main__":
 
 
 
+
+# ------------------ Groups API (enabled) ------------------
+
+@app.get("/groups")
+def get_groups():
+    """Return all groups."""
+    return {"groups": _list_groups()}
+
+
+@app.get("/get_groups")
+def get_groups_legacy():
+    return get_groups()
+
+
+@app.post("/add_group")
+def add_group(payload: Dict[str, Any] = Body(...)):
+    name = _pick(payload.get("name"))
+    if not name:
+        raise HTTPException(status_code=400, detail="Group name is required")
+    gid = _pick(payload.get("id")) or name
+    doc = {
+        "id": gid,
+        "name": name,
+        "multiplier": payload.get("multiplier", 1),
+        "members": payload.get("members", []),
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    path = _group_path(gid)
+    _save(path, doc)
+    return {"success": True, "group": doc}
+
+
+@app.post("/edit_group")
+def edit_group(payload: Dict[str, Any] = Body(...)):
+    return add_group(payload)
+
+
+@app.post("/delete_group")
+def delete_group(payload: Dict[str, Any] = Body(...)):
+    gid = _pick(payload.get("id")) or _pick(payload.get("name"))
+    if not gid:
+        raise HTTPException(status_code=400, detail="Group id/name is required")
+    path = _group_path(gid)
+    _delete(path)
+    return {"success": True}
