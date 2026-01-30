@@ -811,6 +811,7 @@ def edit_client(
     background_tasks: BackgroundTasks,
     payload: Dict[str, Any] = Body(...),
     user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    user_id_q: Optional[str] = Query(None),
 ):
     """
     Edit an existing client for the authenticated user.  Accepts the
@@ -819,10 +820,9 @@ def edit_client(
     renaming or moving a client.  Fields left blank will preserve
     existing values.  After saving, a background login is triggered.
     """
+    user_id = _pick(user_id, user_id_q, payload.get("user_id"), payload.get("owner"), payload.get("username"), payload.get("name"))
     if not user_id:
-        user_id = user_id_q
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing user id. Send X-User-Id header or ?user_id=...")
+        raise HTTPException(status_code=400, detail="Missing user id. Send X-User-Id header or ?user_id=... or include name/user_id in payload")
 
     broker = (_pick(payload.get("broker")) or "motilal").lower()
     if broker not in ("dhan", "motilal"):
@@ -915,16 +915,18 @@ def edit_client(
 # 
 # 
 @app.get("/clients")
-def clients_rows(user_id: Optional[str] = Header(None, alias="X-User-Id")):
+def clients_rows(
+    user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    user_id_q: Optional[str] = Query(None),
+):
     """
     List all clients for the authenticated user.  Each row contains
     minimal client details used by the UI.  Clients are loaded from
     `data/users/<user>/clients/<broker>`.
     """
+    user_id = _pick(user_id, user_id_q)
     if not user_id:
-        user_id = user_id_q
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing user id. Send X-User-Id header or ?user_id=...")
+        raise HTTPException(status_code=400, detail="Missing user id. Send X-User-Id header or ?user_id=... (legacy)")
     rows: List[Dict[str, Any]] = []
     for broker in ("dhan", "motilal"):
         folder = os.path.join(_user_clients_root(user_id), broker)
@@ -951,12 +953,15 @@ def clients_rows(user_id: Optional[str] = Header(None, alias="X-User-Id")):
     return rows
 # 
 @app.get("/get_clients")
-def get_clients_legacy(user_id: Optional[str] = Header(None, alias="X-User-Id")):
+def get_clients_legacy(
+    user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    user_id_q: Optional[str] = Query(None),
+):
     """
     Legacy endpoint to support old UI format.  Returns a list of
     clients with simplified fields.
     """
-    rows = clients_rows(user_id)  # reuse new implementation
+    rows = clients_rows(user_id=user_id, user_id_q=user_id_q)  # reuse new implementation
     return {"clients": [
         {
             "name": r["name"],
