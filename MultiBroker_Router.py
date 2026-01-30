@@ -198,7 +198,7 @@ def _github_file_write(rel_path: str, content: str) -> None:
         return
 
     token, owner, repo, branch = cfg
-    rel_path = rel_path.lstrip("/").replace("\", "/")
+    rel_path = rel_path.lstrip("/").replace("\\", "/")
 
     # ensure all content is base64 encoded
     import base64
@@ -245,7 +245,7 @@ def _github_file_delete(rel_path: str) -> None:
         return
 
     token, owner, repo, branch = cfg
-    rel_path = rel_path.lstrip("/").replace("\", "/")
+    rel_path = rel_path.lstrip("/").replace("\\", "/")
 
     api = f"https://api.github.com/repos/{owner}/{repo}/contents/{rel_path}"
     headers = {
@@ -425,7 +425,7 @@ def _save(path: str, data: Dict[str, Any]):
     # replicate to GitHub
     try:
         rel_path = os.path.relpath(path, BASE_DIR)
-        rel_path = rel_path.replace("\", "/")
+        rel_path = rel_path.replace("\\", "/")
         # store inside repo under /data
         rel_path = "data/" + rel_path.lstrip("/")
         _github_file_write(rel_path, json.dumps(data, indent=4))
