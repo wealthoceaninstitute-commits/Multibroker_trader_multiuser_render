@@ -11,8 +11,6 @@ from fastapi import Query
 import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime
-
 
 from auth.auth_router import router as auth_router
 
@@ -113,7 +111,7 @@ def _user_clients_root(user_id: str) -> str:
 
     data/users/<user>/clients
     """
-    safe_user = _safe(user_id).lower()
+    safe_user = _safe(user_id)
     return os.path.join(USERS_ROOT, safe_user, "clients")
 
 
@@ -124,7 +122,7 @@ def _user_client_path(user_id: str, broker: str, client_id: str) -> str:
     Final structure:
     data/users/<user>/clients/<broker>/<client_id>.json
     """
-    safe_user   = _safe(user_id).lower()
+    safe_user   = _safe(user_id)
     safe_broker = _safe(broker).lower()
     safe_client = _safe(client_id)
 
@@ -166,112 +164,78 @@ def _ensure_dirs():
     os.makedirs(os.path.dirname(SYMBOL_DB_PATH), exist_ok=True)
 # GitHub helper functions removed: GH_HEADERS, GH_CONTENTS_URL, _github_sync_dir, _github_sync_down_all
 # === GitHub persistence helpers ===
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+GITHUB_REPO_OWNER = os.environ.get("GITHUB_REPO_OWNER", "").strip()
+GITHUB_REPO_NAME = os.environ.get("GITHUB_REPO_NAME", "").strip()
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main").strip() or "main"
+GITHUB_SYNC_DISABLED = os.environ.get("GITHUB_SYNC_DISABLED", "").strip().lower() in ("1","true","yes","on")
 
-def _github_cfg():
-    """
-    Returns (token, owner, repo, branch) if configured, else None.
-    """
-    token = os.getenv("GITHUB_TOKEN", "").strip()
-    owner = os.getenv("GITHUB_REPO_OWNER", "").strip()
-    repo = os.getenv("GITHUB_REPO_NAME", "").strip()
-    branch = os.getenv("GITHUB_BRANCH", "main").strip() or "main"
-    if not token or not owner or not repo:
-        return None
-    return token, owner, repo, branch
+def _github_enabled() -> bool:
+    return (not GITHUB_SYNC_DISABLED) and bool(GITHUB_TOKEN and GITHUB_REPO_OWNER and GITHUB_REPO_NAME)
 
-print("[GITHUB_SYNC]", "token=", bool(os.getenv("GITHUB_TOKEN")), 
-      "owner=", os.getenv("GITHUB_REPO_OWNER"),
-      "repo=", os.getenv("GITHUB_REPO_NAME"),
-      "branch=", os.getenv("GITHUB_BRANCH", "main"))
-
-
-
-def _github_file_write(rel_path: str, content: str) -> None:
-    """
-    Write/overwrite a file in GitHub using the Contents API.
-
-    Notes:
-    - rel_path should be a repository path relative to repo root (POSIX separators)
-    - This function is NO-OP if GitHub env vars are not configured.
-    """
-    cfg = _github_cfg()
-    if not cfg:
-        # not configured
-        return
-
-    # Allow disabling via env
-    if os.getenv("GITHUB_SYNC_DISABLED", "").strip().lower() in ("1", "true", "yes"):
-        return
-
-    token, owner, repo, branch = cfg
-    rel_path = rel_path.lstrip("/").replace("\\", "/")
-
-    # ensure all content is base64 encoded
-    import base64
-    b64 = base64.b64encode(content.encode("utf-8")).decode("utf-8")
-
-    api = f"https://api.github.com/repos/{owner}/{repo}/contents/{rel_path}"
-    headers = {
-        "Authorization": f"token {token}",
+def _gh_headers() -> Dict[str, str]:
+    return {
+        "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github+json",
-        "User-Agent": "multibroker-trader",
+        "User-Agent": "multibroker-router",
     }
 
-    # fetch sha if file exists
+def _gh_contents_url(path_in_repo: str) -> str:
+    return f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{path_in_repo}"
+
+def _github_file_write(rel_path: str, content: str) -> None:
+    """Write/overwrite a file in the GitHub repo under the `data/` prefix."""
+    if not _github_enabled():
+        print(f"[GITHUB_DISABLED] skip write: {rel_path}")
+        return
+
+    path_in_repo = ("data/" + rel_path.lstrip("/")).replace("\\", "/")
+    url = _gh_contents_url(path_in_repo)
+
     sha = None
     try:
-        r0 = requests.get(api, headers=headers, params={"ref": branch}, timeout=20)
+        r0 = requests.get(url, headers=_gh_headers(), params={"ref": GITHUB_BRANCH}, timeout=20)
         if r0.status_code == 200:
             sha = (r0.json() or {}).get("sha")
-    except Exception:
-        sha = None
+    except Exception as e:
+        print(f"[GITHUB] sha lookup failed (will try create): {e}")
 
     payload = {
-        "message": f"update {rel_path}",
-        "content": b64,
-        "branch": branch,
+        "message": f"update {path_in_repo}",
+        "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+        "branch": GITHUB_BRANCH,
     }
     if sha:
         payload["sha"] = sha
 
-    r = requests.put(api, headers=headers, json=payload, timeout=30)
-    r.raise_for_status()
-
+    r = requests.put(url, headers=_gh_headers(), json=payload, timeout=30)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"GitHub write failed {r.status_code}: {r.text[:300]}")
+    print(f"[GITHUB_OK] wrote: {path_in_repo}")
 
 def _github_file_delete(rel_path: str) -> None:
-    """
-    Delete a file in GitHub using the Contents API.
-    NO-OP if not configured.
-    """
-    cfg = _github_cfg()
-    if not cfg:
+    """Delete a file in the GitHub repo under the `data/` prefix."""
+    if not _github_enabled():
+        print(f"[GITHUB_DISABLED] skip delete: {rel_path}")
         return
 
-    if os.getenv("GITHUB_SYNC_DISABLED", "").strip().lower() in ("1", "true", "yes"):
-        return
+    path_in_repo = ("data/" + rel_path.lstrip("/")).replace("\\", "/")
+    url = _gh_contents_url(path_in_repo)
 
-    token, owner, repo, branch = cfg
-    rel_path = rel_path.lstrip("/").replace("\\", "/")
-
-    api = f"https://api.github.com/repos/{owner}/{repo}/contents/{rel_path}"
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "multibroker-trader",
-    }
-
-    # Must provide SHA to delete
-    r0 = requests.get(api, headers=headers, params={"ref": branch}, timeout=20)
+    r0 = requests.get(url, headers=_gh_headers(), params={"ref": GITHUB_BRANCH}, timeout=20)
     if r0.status_code != 200:
+        print(f"[GITHUB] delete skip (not found): {path_in_repo}")
         return
     sha = (r0.json() or {}).get("sha")
     if not sha:
+        print(f"[GITHUB] delete skip (no sha): {path_in_repo}")
         return
 
-    payload = {"message": f"delete {rel_path}", "sha": sha, "branch": branch}
-    r = requests.delete(api, headers=headers, json=payload, timeout=30)
-    if r.status_code not in (200, 201, 204):
-        r.raise_for_status()
+    payload = {"message": f"delete {path_in_repo}", "sha": sha, "branch": GITHUB_BRANCH}
+    r = requests.delete(url, headers=_gh_headers(), json=payload, timeout=30)
+    if r.status_code not in (200, 204):
+        raise RuntimeError(f"GitHub delete failed {r.status_code}: {r.text[:300]}")
+    print(f"[GITHUB_OK] deleted: {path_in_repo}")
 
 
 def refresh_symbol_db_from_github() -> str:
@@ -396,7 +360,7 @@ def router_search_symbols(q: str = Query(""), exchange: str = Query("")):
 @app.on_event("startup")
 def _symbols_startup():
     _lazy_init_symbol_db()
-    print("[startup] symbols ready | GitHub sync disabled")
+    print(f"[startup] symbols ready | github={'on' if _github_enabled() else 'off'} | branch={GITHUB_BRANCH}")
 
 
 def _safe(s: str) -> str:
@@ -431,13 +395,11 @@ def _save(path: str, data: Dict[str, Any]):
     # replicate to GitHub
     try:
         rel_path = os.path.relpath(path, BASE_DIR)
+        # Normalise path separators for GitHub
         rel_path = rel_path.replace("\\", "/")
-        # store inside repo under /data
-        rel_path = "data/" + rel_path.lstrip("/")
         _github_file_write(rel_path, json.dumps(data, indent=4))
-    except Exception:
-        # Fail silently if GitHub upload fails
-        pass
+    except Exception as e:
+        print(f"[GITHUB_ERR] {e}")
 
 # ---------- minimal save (no hard failures) ----------
 def _save_minimal(broker: str, payload: Dict[str, Any]) -> str:
@@ -820,11 +782,10 @@ def health():
     return {"ok": True, "brokers": status}
 
 @app.post("/clients/add")
-@app.post("/add_client")  # legacy UI alias
 def add_client(
     background_tasks: BackgroundTasks,
     payload: Dict[str, Any] = Body(...),
-    user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    user_id: str = Header(..., alias="X-User-Id"),
 ):
     """
     Adds a broker client under the logged-in user.
@@ -835,11 +796,9 @@ def add_client(
     Saves to:
         data/users/<user>/clients/<broker>/<user>_<clientid>.json
     """
-    # Accept X-User-Id header (preferred). For legacy UI, fallback to payload fields.
-    user_id = _pick(user_id, payload.get("user_id"), payload.get("owner"), payload.get("username"), payload.get("name"))
 
     if not user_id:
-        raise HTTPException(400, "Missing user id (send X-User-Id header or include name/user_id in payload)")
+        raise HTTPException(400, "Missing X-User-Id header")
 
     broker = (_pick(payload.get("broker")) or "motilal").lower()
     if broker not in ("dhan", "motilal"):
@@ -904,8 +863,7 @@ def add_client(
 def edit_client(
     background_tasks: BackgroundTasks,
     payload: Dict[str, Any] = Body(...),
-    user_id: Optional[str] = Header(None, alias="X-User-Id"),
-    user_id_q: Optional[str] = Query(None, alias="user_id"),
+    user_id: str = Header(..., alias="X-User-Id"),
 ):
     """
     Edit an existing client for the authenticated user.  Accepts the
@@ -914,9 +872,8 @@ def edit_client(
     renaming or moving a client.  Fields left blank will preserve
     existing values.  After saving, a background login is triggered.
     """
-    user_id = _pick(user_id, user_id_q, payload.get("user_id"), payload.get("owner"), payload.get("username"), payload.get("name"))
     if not user_id:
-        raise HTTPException(status_code=400, detail="Missing user id. Send X-User-Id header or ?user_id=... or include name/user_id in payload")
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
 
     broker = (_pick(payload.get("broker")) or "motilal").lower()
     if broker not in ("dhan", "motilal"):
@@ -1009,18 +966,14 @@ def edit_client(
 # 
 # 
 @app.get("/clients")
-def clients_rows(
-    user_id: Optional[str] = Header(None, alias="X-User-Id"),
-    user_id_q: Optional[str] = Query(None, alias="user_id"),
-):
+def clients_rows(user_id: str = Header(..., alias="X-User-Id")):
     """
     List all clients for the authenticated user.  Each row contains
     minimal client details used by the UI.  Clients are loaded from
     `data/users/<user>/clients/<broker>`.
     """
-    user_id = _pick(user_id, user_id_q)
     if not user_id:
-        return []  # legacy UI may call without header; return empty list instead of error
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
     rows: List[Dict[str, Any]] = []
     for broker in ("dhan", "motilal"):
         folder = os.path.join(_user_clients_root(user_id), broker)
@@ -1047,15 +1000,12 @@ def clients_rows(
     return rows
 # 
 @app.get("/get_clients")
-def get_clients_legacy(
-    user_id: Optional[str] = Header(None, alias="X-User-Id"),
-    user_id_q: Optional[str] = Query(None, alias="user_id"),
-):
+def get_clients_legacy(user_id: str = Header(..., alias="X-User-Id")):
     """
     Legacy endpoint to support old UI format.  Returns a list of
     clients with simplified fields.
     """
-    rows = clients_rows(user_id=user_id, user_id_q=user_id_q)  # reuse new implementation
+    rows = clients_rows(user_id)  # reuse new implementation
     return {"clients": [
         {
             "name": r["name"],
@@ -1068,7 +1018,7 @@ def get_clients_legacy(
 @app.post("/clients/delete")
 def delete_client(
     payload: Dict[str, Any] = Body(...),
-    user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    user_id: str = Header(..., alias="X-User-Id"),
 ):
     """
     Delete one or more clients for the authenticated user.
@@ -2323,88 +2273,5 @@ if __name__ == "__main__":
 
 
 
-
-
-
-# -------------------------
-# Groups API (enabled)
-# -------------------------
-@app.get("/groups")
-def get_groups():
-    """List all saved groups."""
-    try:
-        items = _list_groups()
-        groups = [{
-            "id": g.get("id"),
-            "name": g.get("name"),
-            "multiplier": g.get("multiplier", 1),
-            "members": g.get("members", []),
-        } for g in items]
-        return {"groups": groups}
-    except Exception as e:
-        return {"groups": [], "error": str(e)}
-
-@app.get("/get_groups")
-def get_groups_alias():
-    return get_groups()
-
-@app.post("/edit_group")
-def edit_group(payload: Dict[str, Any] = Body(...)):
-    id_or_name = _pick(payload.get("id"), payload.get("name"))
-    if not id_or_name:
-        raise HTTPException(status_code=400, detail="group 'id' or 'name' is required")
-    path = _find_group_path(id_or_name)
-    if not path:
-        raise HTTPException(status_code=404, detail="group not found")
-
-    doc = _read_json(path) or {}
-    if payload.get("name"):
-        doc["name"] = str(payload["name"]).strip()
-
-    if "multiplier" in payload:
-        try:
-            m = float(payload.get("multiplier", 1))
-            if m <= 0:
-                raise ValueError
-        except Exception:
-            raise HTTPException(status_code=400, detail="invalid 'multiplier'")
-        doc["multiplier"] = m
-
-    if "members" in payload:
-        raw = payload.get("members") or []
-        members: List[Dict[str, str]] = []
-        for m in raw:
-            b = (_pick((m or {}).get("broker")) or "").lower()
-            u = _pick((m or {}).get("userid"), (m or {}).get("client_id"))
-            if b and u:
-                members.append({"broker": b, "userid": u})
-        if not members:
-            raise HTTPException(status_code=400, detail="at least one valid member is required")
-        doc["members"] = members
-
-    doc["id"] = doc.get("id") or os.path.splitext(os.path.basename(path))[0]
-    _save(path, doc)
-    return {"success": True, "group": doc}
-
-@app.post("/delete_group")
-def delete_group(payload: Dict[str, Any] = Body(...)):
-    ids = payload.get("ids") or []
-    names = payload.get("names") or []
-    if not ids and not names:
-        raise HTTPException(status_code=400, detail="provide 'ids' and/or 'names'")
-    deleted = []
-    for key in ids + names:
-        path = _find_group_path(str(key))
-        if not path:
-            continue
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-            # Also attempt github delete (if enabled)
-            _github_file_delete(path)
-            deleted.append(os.path.splitext(os.path.basename(path))[0])
-        except Exception:
-            pass
-    return {"success": True, "deleted": deleted}
 
 
