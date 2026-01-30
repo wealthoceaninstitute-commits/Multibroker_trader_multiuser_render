@@ -164,19 +164,93 @@ def _ensure_dirs():
     os.makedirs(os.path.dirname(SYMBOL_DB_PATH), exist_ok=True)
 # GitHub helper functions removed: GH_HEADERS, GH_CONTENTS_URL, _github_sync_dir, _github_sync_down_all
 # === GitHub persistence helpers ===
-def _github_file_write(rel_path: str, content: str) -> None:
-    """
-    NO GitHub sync in this test mode.
-    This function now only prints the intent.
-    """
-    print(f"[TEST MODE] Skipped GitHub upload: {rel_path}")
+def _github_cfg() -> Dict[str, str]:
+    """Read GitHub configuration from env (supports multiple variable names)."""
+    token  = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or ""
+    owner  = os.getenv("GITHUB_REPO_OWNER") or os.getenv("GITHUB_OWNER") or ""
+    repo   = os.getenv("GITHUB_REPO_NAME") or os.getenv("GITHUB_REPO") or ""
+    branch = os.getenv("GITHUB_BRANCH") or "main"
+    return {"token": token.strip(), "owner": owner.strip(), "repo": repo.strip(), "branch": branch.strip()}
 
 
-def _github_file_delete(rel_path: str) -> None:
+def _github_contents_api_url(owner: str, repo: str, path_in_repo: str) -> str:
+    # GitHub Contents API
+    path_in_repo = path_in_repo.lstrip("/")
+    return f"https://api.github.com/repos/{owner}/{repo}/contents/{path_in_repo}"
+
+
+def _github_get_sha(owner: str, repo: str, branch: str, path_in_repo: str, token: str) -> str | None:
+    """Return blob SHA for an existing path, else None."""
+    try:
+        url = _github_contents_api_url(owner, repo, path_in_repo)
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+        r = requests.get(url, headers=headers, params={"ref": branch}, timeout=30)
+        if r.status_code == 200:
+            return (r.json() or {}).get("sha")
+        return None
+    except Exception:
+        return None
+
+
+def _github_file_write(rel_pathh: str, content: str) -> None:
     """
-    NO GitHub delete in test mode.
+    Write/update a file in the configured GitHub repo using the Contents API.
+
+    NOTE: rel_pathh is expected to be relative to BASE_DIR (e.g. users/pra/clients/dhan/110004.json)
+    Repo path will be: data/<rel_pathh> to match your repo layout.
     """
-    print(f"[TEST MODE] Skipped GitHub delete: {rel_path}")
+    cfg = _github_cfg()
+    if not (cfg["token"] and cfg["owner"] and cfg["repo"]):
+        print(f"[GITHUB] Skipped upload (missing config) rel_pathh={rel_pathh}")
+        return
+
+    # Match repo layout: data/users/...
+    repo_path = rel_pathh.replace("\\", "/").lstrip("/")
+    if not repo_path.startswith("data/"):
+        repo_path = "data/" + repo_path
+
+    owner, repo, branch, token = cfg["owner"], cfg["repo"], cfg["branch"], cfg["token"]
+    url = _github_contents_api_url(owner, repo, repo_path)
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+
+    sha = _github_get_sha(owner, repo, branch, repo_path, token)
+    payload = {
+        "message": f"update {repo_path}",
+        "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+        "branch": branch,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    r = requests.put(url, headers=headers, json=payload, timeout=30)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"GitHub write failed {r.status_code}: {r.text[:200]}")
+
+
+def _github_file_delete(rel_pathh: str) -> None:
+    """Delete a file from the configured GitHub repo (Contents API)."""
+    cfg = _github_cfg()
+    if not (cfg["token"] and cfg["owner"] and cfg["repo"]):
+        print(f"[GITHUB] Skipped delete (missing config) rel_pathh={rel_pathh}")
+        return
+
+    repo_path = rel_pathh.replace("\\", "/").lstrip("/")
+    if not repo_path.startswith("data/"):
+        repo_path = "data/" + repo_path
+
+    owner, repo, branch, token = cfg["owner"], cfg["repo"], cfg["branch"], cfg["token"]
+    url = _github_contents_api_url(owner, repo, repo_path)
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+
+    sha = _github_get_sha(owner, repo, branch, repo_path, token)
+    if not sha:
+        # nothing to delete
+        return
+
+    payload = {"message": f"delete {repo_path}", "sha": sha, "branch": branch}
+    r = requests.delete(url, headers=headers, json=payload, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"GitHub delete failed {r.status_code}: {r.text[:200]}")
 
 
 def refresh_symbol_db_from_github() -> str:
@@ -335,10 +409,10 @@ def _save(path: str, data: Dict[str, Any]):
         json.dump(data, f, indent=4)
     # replicate to GitHub
     try:
-        rel_path = os.path.relpath(path, BASE_DIR)
+        rel_pathh = os.path.relpath(path, BASE_DIR)
         # Normalise path separators for GitHub
-        rel_path = rel_path.replace("\\", "/")
-        _github_file_write(rel_path, json.dumps(data, indent=4))
+        rel_pathh = rel_pathh.replace("\\", "/")
+        _github_file_write(rel_pathh, json.dumps(data, indent=4))
     except Exception:
         # Fail silently if GitHub upload fails
         pass
@@ -560,8 +634,8 @@ def _delete_client_file(broker: str, userid: str) -> bool:
         os.remove(path)
         # Remove from GitHub as well
         try:
-            rel_path = os.path.relpath(path, BASE_DIR).replace("\\", "/")
-            _github_file_delete(rel_path)
+            rel_pathh = os.path.relpath(path, BASE_DIR).replace("\\", "/")
+            _github_file_delete(rel_pathh)
         except Exception:
             pass
         return True
@@ -999,8 +1073,8 @@ def delete_client(
                 os.remove(path)
                 # Remove from GitHub as well
                 try:
-                    rel_path = os.path.relpath(path, BASE_DIR).replace("\\", "/")
-                    _github_file_delete(rel_path)
+                    rel_pathh = os.path.relpath(path, BASE_DIR).replace("\\", "/")
+                    _github_file_delete(rel_pathh)
                 except Exception:
                     pass
                 deleted.append({"broker": broker, "client_id": client_id})
@@ -1164,8 +1238,8 @@ def delete_client(
 #                 os.remove(p)
 #                 # replicate delete to GitHub
 #                 try:
-#                     rel_path = os.path.relpath(p, BASE_DIR).replace("\\", "/")
-#                     _github_file_delete(rel_path)
+#                     rel_pathh = os.path.relpath(p, BASE_DIR).replace("\\", "/")
+#                     _github_file_delete(rel_pathh)
 #                 except Exception:
 #                     pass
 #                 deleted.append(os.path.splitext(os.path.basename(p))[0])
@@ -1302,8 +1376,8 @@ def delete_client(
 #             try:
 #                 os.remove(p)
 #                 try:
-#                     rel_path = os.path.relpath(p, BASE_DIR).replace("\\", "/")
-#                     _github_file_delete(rel_path)
+#                     rel_pathh = os.path.relpath(p, BASE_DIR).replace("\\", "/")
+#                     _github_file_delete(rel_pathh)
 #                 except Exception:
 #                     pass
 #                 deleted.append(os.path.splitext(os.path.basename(p))[0])
