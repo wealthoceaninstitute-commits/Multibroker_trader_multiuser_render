@@ -113,7 +113,7 @@ def _user_clients_root(user_id: str) -> str:
 
     data/users/<user>/clients
     """
-    safe_user = _safe(user_id)
+    safe_user = _safe(user_id).lower()
     return os.path.join(USERS_ROOT, safe_user, "clients")
 
 
@@ -124,7 +124,7 @@ def _user_client_path(user_id: str, broker: str, client_id: str) -> str:
     Final structure:
     data/users/<user>/clients/<broker>/<client_id>.json
     """
-    safe_user   = _safe(user_id)
+    safe_user   = _safe(user_id).lower()
     safe_broker = _safe(broker).lower()
     safe_client = _safe(client_id)
 
@@ -166,19 +166,106 @@ def _ensure_dirs():
     os.makedirs(os.path.dirname(SYMBOL_DB_PATH), exist_ok=True)
 # GitHub helper functions removed: GH_HEADERS, GH_CONTENTS_URL, _github_sync_dir, _github_sync_down_all
 # === GitHub persistence helpers ===
+
+def _github_cfg():
+    """
+    Returns (token, owner, repo, branch) if configured, else None.
+    """
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    owner = os.getenv("GITHUB_REPO_OWNER", "").strip()
+    repo = os.getenv("GITHUB_REPO_NAME", "").strip()
+    branch = os.getenv("GITHUB_BRANCH", "main").strip() or "main"
+    if not token or not owner or not repo:
+        return None
+    return token, owner, repo, branch
+
+
 def _github_file_write(rel_path: str, content: str) -> None:
     """
-    NO GitHub sync in this test mode.
-    This function now only prints the intent.
+    Write/overwrite a file in GitHub using the Contents API.
+
+    Notes:
+    - rel_path should be a repository path relative to repo root (POSIX separators)
+    - This function is NO-OP if GitHub env vars are not configured.
     """
-    print(f"[TEST MODE] Skipped GitHub upload: {rel_path}")
+    cfg = _github_cfg()
+    if not cfg:
+        # not configured
+        return
+
+    # Allow disabling via env
+    if os.getenv("GITHUB_SYNC_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+        return
+
+    token, owner, repo, branch = cfg
+    rel_path = rel_path.lstrip("/").replace("\", "/")
+
+    # ensure all content is base64 encoded
+    import base64
+    b64 = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+
+    api = f"https://api.github.com/repos/{owner}/{repo}/contents/{rel_path}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "multibroker-trader",
+    }
+
+    # fetch sha if file exists
+    sha = None
+    try:
+        r0 = requests.get(api, headers=headers, params={"ref": branch}, timeout=20)
+        if r0.status_code == 200:
+            sha = (r0.json() or {}).get("sha")
+    except Exception:
+        sha = None
+
+    payload = {
+        "message": f"update {rel_path}",
+        "content": b64,
+        "branch": branch,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    r = requests.put(api, headers=headers, json=payload, timeout=30)
+    r.raise_for_status()
 
 
 def _github_file_delete(rel_path: str) -> None:
     """
-    NO GitHub delete in test mode.
+    Delete a file in GitHub using the Contents API.
+    NO-OP if not configured.
     """
-    print(f"[TEST MODE] Skipped GitHub delete: {rel_path}")
+    cfg = _github_cfg()
+    if not cfg:
+        return
+
+    if os.getenv("GITHUB_SYNC_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+        return
+
+    token, owner, repo, branch = cfg
+    rel_path = rel_path.lstrip("/").replace("\", "/")
+
+    api = f"https://api.github.com/repos/{owner}/{repo}/contents/{rel_path}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "multibroker-trader",
+    }
+
+    # Must provide SHA to delete
+    r0 = requests.get(api, headers=headers, params={"ref": branch}, timeout=20)
+    if r0.status_code != 200:
+        return
+    sha = (r0.json() or {}).get("sha")
+    if not sha:
+        return
+
+    payload = {"message": f"delete {rel_path}", "sha": sha, "branch": branch}
+    r = requests.delete(api, headers=headers, json=payload, timeout=30)
+    if r.status_code not in (200, 201, 204):
+        r.raise_for_status()
 
 
 def refresh_symbol_db_from_github() -> str:
@@ -338,8 +425,9 @@ def _save(path: str, data: Dict[str, Any]):
     # replicate to GitHub
     try:
         rel_path = os.path.relpath(path, BASE_DIR)
-        # Normalise path separators for GitHub
-        rel_path = rel_path.replace("\\", "/")
+        rel_path = rel_path.replace("\", "/")
+        # store inside repo under /data
+        rel_path = "data/" + rel_path.lstrip("/")
         _github_file_write(rel_path, json.dumps(data, indent=4))
     except Exception:
         # Fail silently if GitHub upload fails
