@@ -811,7 +811,7 @@ def edit_client(
     background_tasks: BackgroundTasks,
     payload: Dict[str, Any] = Body(...),
     user_id: Optional[str] = Header(None, alias="X-User-Id"),
-    user_id_q: Optional[str] = Query(None),
+    user_id_q: Optional[str] = Query(None, alias="user_id"),
 ):
     """
     Edit an existing client for the authenticated user.  Accepts the
@@ -917,7 +917,7 @@ def edit_client(
 @app.get("/clients")
 def clients_rows(
     user_id: Optional[str] = Header(None, alias="X-User-Id"),
-    user_id_q: Optional[str] = Query(None),
+    user_id_q: Optional[str] = Query(None, alias="user_id"),
 ):
     """
     List all clients for the authenticated user.  Each row contains
@@ -926,7 +926,7 @@ def clients_rows(
     """
     user_id = _pick(user_id, user_id_q)
     if not user_id:
-        raise HTTPException(status_code=400, detail="Missing user id. Send X-User-Id header or ?user_id=... (legacy)")
+        return []  # legacy UI may call without header; return empty list instead of error
     rows: List[Dict[str, Any]] = []
     for broker in ("dhan", "motilal"):
         folder = os.path.join(_user_clients_root(user_id), broker)
@@ -955,7 +955,7 @@ def clients_rows(
 @app.get("/get_clients")
 def get_clients_legacy(
     user_id: Optional[str] = Header(None, alias="X-User-Id"),
-    user_id_q: Optional[str] = Query(None),
+    user_id_q: Optional[str] = Query(None, alias="user_id"),
 ):
     """
     Legacy endpoint to support old UI format.  Returns a list of
