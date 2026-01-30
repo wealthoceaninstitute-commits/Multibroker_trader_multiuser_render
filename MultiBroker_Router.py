@@ -179,6 +179,12 @@ def _github_cfg():
         return None
     return token, owner, repo, branch
 
+print("[GITHUB_SYNC]", "token=", bool(os.getenv("GITHUB_TOKEN")), 
+      "owner=", os.getenv("GITHUB_REPO_OWNER"),
+      "repo=", os.getenv("GITHUB_REPO_NAME"),
+      "branch=", os.getenv("GITHUB_BRANCH", "main"))
+
+
 
 def _github_file_write(rel_path: str, content: str) -> None:
     """
@@ -2400,4 +2406,5 @@ def delete_group(payload: Dict[str, Any] = Body(...)):
         except Exception:
             pass
     return {"success": True, "deleted": deleted}
+
 
