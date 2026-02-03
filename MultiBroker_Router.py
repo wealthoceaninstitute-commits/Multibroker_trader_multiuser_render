@@ -11,7 +11,6 @@ from fastapi import Query
 import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime
 
 from auth.auth_router import router as auth_router
 
@@ -112,7 +111,7 @@ def _user_clients_root(user_id: str) -> str:
 
     data/users/<user>/clients
     """
-    safe_user = _resolve_user_id(user_id)
+    safe_user = _safe(user_id)
     return os.path.join(USERS_ROOT, safe_user, "clients")
 
 
@@ -123,7 +122,7 @@ def _user_client_path(user_id: str, broker: str, client_id: str) -> str:
     Final structure:
     data/users/<user>/clients/<broker>/<client_id>.json
     """
-    safe_user   = _resolve_user_id(user_id)
+    safe_user   = _safe(user_id)
     safe_broker = _safe(broker).lower()
     safe_client = _safe(client_id)
 
@@ -172,7 +171,18 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main").strip() or "main"
 GITHUB_SYNC_DISABLED = os.environ.get("GITHUB_SYNC_DISABLED", "").strip().lower() in ("1","true","yes","on")
 
 def _github_enabled() -> bool:
-    return (not GITHUB_SYNC_DISABLED) and bool(GITHUB_TOKEN and GITHUB_REPO_OWNER and GITHUB_REPO_NAME)
+    """
+    Determine if GitHub persistence should be enabled.
+
+    This implementation now ignores the ``GITHUB_SYNC_DISABLED`` environment
+    variable so long as the required GitHub credentials (token, owner and
+    repository name) are present.  In other words, if you configure
+    ``GITHUB_TOKEN``, ``GITHUB_REPO_OWNER`` and ``GITHUB_REPO_NAME``, the
+    router will always attempt to mirror saved JSON documents to your
+    GitHub repository.  This change allows client JSON files to be
+    persisted to GitHub without depending on the optional disabling flag.
+    """
+    return bool(GITHUB_TOKEN and GITHUB_REPO_OWNER and GITHUB_REPO_NAME)
 
 def _gh_headers() -> Dict[str, str]:
     return {
@@ -367,57 +377,6 @@ def _symbols_startup():
 def _safe(s: str) -> str:
     s = (s or "").strip().replace(" ", "_")
     return "".join(ch for ch in s if ch.isalnum() or ch in ("_", "-"))
-
-def _resolve_user_id(raw_user_id: str) -> str:
-    """
-    Resolve the effective user folder under data/users/.
-
-    Why:
-      - Your auth layer may return an internal numeric id (e.g. "365464")
-      - But your repo/user folders may be usernames (e.g. "pra")
-
-    Rules:
-      1) If data/users/<raw>/ exists -> use it.
-      2) Else scan each data/users/<folder>/profile.json and match any id fields.
-      3) Else fall back to a sanitized version of raw_user_id.
-    """
-    raw = (raw_user_id or "").strip()
-    if not raw:
-        return ""
-
-    # If folder already exists exactly, use it
-    direct = _safe(raw)
-    if direct and os.path.isdir(os.path.join(USERS_ROOT, direct)):
-        return direct
-
-    # Try profile.json mapping
-    try:
-        for folder in os.listdir(USERS_ROOT):
-            prof = os.path.join(USERS_ROOT, folder, "profile.json")
-            if not os.path.exists(prof):
-                continue
-            try:
-                with open(prof, "r", encoding="utf-8") as f:
-                    pj = json.load(f) or {}
-            except Exception:
-                continue
-
-            # common keys used by auth/profile payloads
-            candidates = [
-                pj.get("user_id"), pj.get("userid"), pj.get("userId"), pj.get("id"), pj.get("uid"),
-                (pj.get("profile") or {}).get("user_id") if isinstance(pj.get("profile"), dict) else None,
-                (pj.get("profile") or {}).get("id") if isinstance(pj.get("profile"), dict) else None,
-            ]
-            candidates = [str(x).strip() for x in candidates if x is not None and str(x).strip()]
-
-            if raw in candidates or _safe(raw) in [ _safe(x) for x in candidates ]:
-                return folder
-    except Exception:
-        pass
-
-    # fallback: sanitized raw
-    return direct
-
 
 def _pick(*vals) -> str:
     for v in vals:
@@ -680,6 +639,43 @@ def _delete_client_file(broker: str, userid: str) -> bool:
     except Exception as e:
         raise HTTPException(status_code=500,
                             detail=f"Failed deleting {broker}/{userid}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Generic file deletion helper
+#
+# The groups and copy‑trading endpoints use a `_delete` helper to remove
+# arbitrary JSON files under data/groups or data/copy_setups.  The original
+# implementation referenced a `_delete` function that did not exist in this
+# module, causing a NameError at runtime.  The helper defined below
+# performs the deletion of a file on disk and, if GitHub persistence is
+# enabled, also mirrors the deletion to the configured GitHub repository.
+
+def _delete(path: str) -> None:
+    """Delete a file and replicate the deletion to GitHub, if configured.
+
+    Parameters
+    ----------
+    path: str
+        Absolute path to the file to delete.
+
+    This helper silently ignores missing files and any errors during GitHub
+    operations, preserving backward compatibility with the original behaviour.
+    """
+    try:
+        os.remove(path)
+        # Remove from GitHub as well
+        try:
+            rel_path = os.path.relpath(path, BASE_DIR).replace("\\", "/")
+            _github_file_delete(rel_path)
+        except Exception:
+            pass
+    except FileNotFoundError:
+        # File already absent – nothing to do
+        pass
+    except Exception:
+        # Silently ignore other errors to avoid breaking group deletion
+        pass
     
 
 def _list_groups() -> list[dict]:
@@ -913,9 +909,33 @@ def add_client(
     }
 
 @app.post("/add_client")
-def add_client_legacy(payload: Dict[str, Any] = Body(...)):
-    """Legacy alias for older frontend which posts to /add_client."""
-    return add_client(payload)
+def add_client_legacy(
+    background_tasks: BackgroundTasks,
+    payload: Dict[str, Any] = Body(...),
+    user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    """
+    Legacy alias for older frontend which posts to /add_client.
+
+    This endpoint accepts the same JSON payload as the modern `/clients/add` and
+    forwards the call to the new handler.  It also attempts to resolve the
+    user id from the `X-User-Id` header or from common payload keys
+    (`user_id`, `userId`, `userid`, `owner_userid`).  If no user id can be
+    resolved, an HTTP 400 error is raised.
+    """
+    # Resolve user id from header or payload fallbacks
+    uid = (user_id or "").strip() or _pick(
+        payload.get("user_id"),
+        payload.get("userId"),
+        payload.get("userid"),
+        payload.get("owner_userid"),
+    )
+    if not uid:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing user id. Send X-User-Id header (recommended).",
+        )
+    return add_client(background_tasks=background_tasks, payload=payload, user_id=uid)
 
 @app.post("/clients/edit")
 def edit_client(
@@ -930,7 +950,8 @@ def edit_client(
     renaming or moving a client.  Fields left blank will preserve
     existing values.  After saving, a background login is triggered.
     """
-    user_id = (user_id or user_id_q or "").strip().lower()
+    # Normalise user_id; the legacy variable user_id_q is not defined in this context.
+    user_id = (user_id or "").strip().lower()
     if not user_id:
         return []
 
@@ -1031,7 +1052,8 @@ def clients_rows(user_id: str = Header(..., alias="X-User-Id")):
     minimal client details used by the UI.  Clients are loaded from
     `data/users/<user>/clients/<broker>`.
     """
-    user_id = (user_id or user_id_q or "").strip().lower()
+    # Normalise user_id; the legacy variable user_id_q is not defined in this context.
+    user_id = (user_id or "").strip().lower()
     if not user_id:
         return {"clients": []}
     rows: List[Dict[str, Any]] = []
