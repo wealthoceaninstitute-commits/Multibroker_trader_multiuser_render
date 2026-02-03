@@ -171,7 +171,18 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main").strip() or "main"
 GITHUB_SYNC_DISABLED = os.environ.get("GITHUB_SYNC_DISABLED", "").strip().lower() in ("1","true","yes","on")
 
 def _github_enabled() -> bool:
-    return (not GITHUB_SYNC_DISABLED) and bool(GITHUB_TOKEN and GITHUB_REPO_OWNER and GITHUB_REPO_NAME)
+    """
+    Determine if GitHub persistence should be enabled.
+
+    This implementation now ignores the ``GITHUB_SYNC_DISABLED`` environment
+    variable so long as the required GitHub credentials (token, owner and
+    repository name) are present.  In other words, if you configure
+    ``GITHUB_TOKEN``, ``GITHUB_REPO_OWNER`` and ``GITHUB_REPO_NAME``, the
+    router will always attempt to mirror saved JSON documents to your
+    GitHub repository.  This change allows client JSON files to be
+    persisted to GitHub without depending on the optional disabling flag.
+    """
+    return bool(GITHUB_TOKEN and GITHUB_REPO_OWNER and GITHUB_REPO_NAME)
 
 def _gh_headers() -> Dict[str, str]:
     return {
@@ -861,10 +872,32 @@ def add_client(
     }
 
 @app.post("/add_client")
-def add_client_legacy(payload: Dict[str, Any] = Body(...)):
-    """Legacy alias for older frontend which posts to /add_client."""
-    return add_client(payload)
+def add_client_legacy(
+    background_tasks: BackgroundTasks,
+    payload: Dict[str, Any] = Body(...),
+    user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    """
+    Legacy alias for older frontend which posts to /add_client.
 
+    Fixes:
+    - FastAPI must inject BackgroundTasks (so the login task executes)
+    - Ensure we pass arguments to add_client() using the correct parameter names
+
+    This endpoint will accept user id from:
+      1) Header: X-User-Id
+      2) Payload: user_id / userId / userid / owner_userid
+    """
+    uid = (user_id or "").strip() or _pick(
+        payload.get("user_id"),
+        payload.get("userId"),
+        payload.get("userid"),
+        payload.get("owner_userid"),
+    )
+    if not uid:
+        raise HTTPException(status_code=400, detail="Missing user id. Send X-User-Id header (recommended).")
+
+    return add_client(background_tasks=background_tasks, payload=payload, user_id=uid)
 @app.post("/clients/edit")
 def edit_client(
     background_tasks: BackgroundTasks,
