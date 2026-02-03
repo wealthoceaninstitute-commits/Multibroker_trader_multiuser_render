@@ -112,7 +112,7 @@ def _user_clients_root(user_id: str) -> str:
 
     data/users/<user>/clients
     """
-    safe_user = _safe(user_id)
+    safe_user = _resolve_user_id(user_id)
     return os.path.join(USERS_ROOT, safe_user, "clients")
 
 
@@ -123,7 +123,7 @@ def _user_client_path(user_id: str, broker: str, client_id: str) -> str:
     Final structure:
     data/users/<user>/clients/<broker>/<client_id>.json
     """
-    safe_user   = _safe(user_id)
+    safe_user   = _resolve_user_id(user_id)
     safe_broker = _safe(broker).lower()
     safe_client = _safe(client_id)
 
@@ -172,18 +172,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main").strip() or "main"
 GITHUB_SYNC_DISABLED = os.environ.get("GITHUB_SYNC_DISABLED", "").strip().lower() in ("1","true","yes","on")
 
 def _github_enabled() -> bool:
-    """
-    Determine if GitHub persistence should be enabled.
-
-    This implementation now ignores the ``GITHUB_SYNC_DISABLED`` environment
-    variable so long as the required GitHub credentials (token, owner and
-    repository name) are present.  In other words, if you configure
-    ``GITHUB_TOKEN``, ``GITHUB_REPO_OWNER`` and ``GITHUB_REPO_NAME``, the
-    router will always attempt to mirror saved JSON documents to your
-    GitHub repository.  This change allows client JSON files to be
-    persisted to GitHub without depending on the optional disabling flag.
-    """
-    return bool(GITHUB_TOKEN and GITHUB_REPO_OWNER and GITHUB_REPO_NAME)
+    return (not GITHUB_SYNC_DISABLED) and bool(GITHUB_TOKEN and GITHUB_REPO_OWNER and GITHUB_REPO_NAME)
 
 def _gh_headers() -> Dict[str, str]:
     return {
@@ -378,6 +367,57 @@ def _symbols_startup():
 def _safe(s: str) -> str:
     s = (s or "").strip().replace(" ", "_")
     return "".join(ch for ch in s if ch.isalnum() or ch in ("_", "-"))
+
+def _resolve_user_id(raw_user_id: str) -> str:
+    """
+    Resolve the effective user folder under data/users/.
+
+    Why:
+      - Your auth layer may return an internal numeric id (e.g. "365464")
+      - But your repo/user folders may be usernames (e.g. "pra")
+
+    Rules:
+      1) If data/users/<raw>/ exists -> use it.
+      2) Else scan each data/users/<folder>/profile.json and match any id fields.
+      3) Else fall back to a sanitized version of raw_user_id.
+    """
+    raw = (raw_user_id or "").strip()
+    if not raw:
+        return ""
+
+    # If folder already exists exactly, use it
+    direct = _safe(raw)
+    if direct and os.path.isdir(os.path.join(USERS_ROOT, direct)):
+        return direct
+
+    # Try profile.json mapping
+    try:
+        for folder in os.listdir(USERS_ROOT):
+            prof = os.path.join(USERS_ROOT, folder, "profile.json")
+            if not os.path.exists(prof):
+                continue
+            try:
+                with open(prof, "r", encoding="utf-8") as f:
+                    pj = json.load(f) or {}
+            except Exception:
+                continue
+
+            # common keys used by auth/profile payloads
+            candidates = [
+                pj.get("user_id"), pj.get("userid"), pj.get("userId"), pj.get("id"), pj.get("uid"),
+                (pj.get("profile") or {}).get("user_id") if isinstance(pj.get("profile"), dict) else None,
+                (pj.get("profile") or {}).get("id") if isinstance(pj.get("profile"), dict) else None,
+            ]
+            candidates = [str(x).strip() for x in candidates if x is not None and str(x).strip()]
+
+            if raw in candidates or _safe(raw) in [ _safe(x) for x in candidates ]:
+                return folder
+    except Exception:
+        pass
+
+    # fallback: sanitized raw
+    return direct
+
 
 def _pick(*vals) -> str:
     for v in vals:
@@ -873,32 +913,10 @@ def add_client(
     }
 
 @app.post("/add_client")
-def add_client_legacy(
-    background_tasks: BackgroundTasks,
-    payload: Dict[str, Any] = Body(...),
-    user_id: Optional[str] = Header(None, alias="X-User-Id"),
-):
-    """
-    Legacy alias for older frontend which posts to /add_client.
+def add_client_legacy(payload: Dict[str, Any] = Body(...)):
+    """Legacy alias for older frontend which posts to /add_client."""
+    return add_client(payload)
 
-    Fixes:
-    - FastAPI must inject BackgroundTasks (so the login task executes)
-    - Ensure we pass arguments to add_client() using the correct parameter names
-
-    This endpoint will accept user id from:
-      1) Header: X-User-Id
-      2) Payload: user_id / userId / userid / owner_userid
-    """
-    uid = (user_id or "").strip() or _pick(
-        payload.get("user_id"),
-        payload.get("userId"),
-        payload.get("userid"),
-        payload.get("owner_userid"),
-    )
-    if not uid:
-        raise HTTPException(status_code=400, detail="Missing user id. Send X-User-Id header (recommended).")
-
-    return add_client(background_tasks=background_tasks, payload=payload, user_id=uid)
 @app.post("/clients/edit")
 def edit_client(
     background_tasks: BackgroundTasks,
@@ -2362,4 +2380,3 @@ def delete_group(payload: Dict[str, Any] = Body(...)):
     path = _group_path(gid)
     _delete(path)
     return {"success": True}
-
