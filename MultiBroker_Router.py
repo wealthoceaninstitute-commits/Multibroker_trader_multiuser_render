@@ -872,9 +872,33 @@ def add_client(
     }
 
 @app.post("/add_client")
-def add_client_legacy(payload: Dict[str, Any] = Body(...)):
-    """Legacy alias for older frontend which posts to /add_client."""
-    return add_client(payload)
+def add_client_legacy(
+    background_tasks: BackgroundTasks,
+    payload: Dict[str, Any] = Body(...),
+    user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    """
+    Legacy alias for older frontend which posts to /add_client.
+
+    Fixes:
+    - FastAPI must inject BackgroundTasks (so the login task executes)
+    - Ensure we pass arguments to add_client() using the correct parameter names
+
+    This endpoint will accept user id from:
+      1) Header: X-User-Id
+      2) Payload: user_id / userId / userid / owner_userid
+    """
+    uid = (user_id or "").strip() or _pick(
+        payload.get("user_id"),
+        payload.get("userId"),
+        payload.get("userid"),
+        payload.get("owner_userid"),
+    )
+    if not uid:
+        raise HTTPException(status_code=400, detail="Missing user id. Send X-User-Id header (recommended).")
+
+    return add_client(background_tasks=background_tasks, payload=payload, user_id=uid)
+(payload)
 
 @app.post("/clients/edit")
 def edit_client(
