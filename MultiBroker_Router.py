@@ -171,7 +171,18 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main").strip() or "main"
 GITHUB_SYNC_DISABLED = os.environ.get("GITHUB_SYNC_DISABLED", "").strip().lower() in ("1","true","yes","on")
 
 def _github_enabled() -> bool:
-    return (not GITHUB_SYNC_DISABLED) and bool(GITHUB_TOKEN and GITHUB_REPO_OWNER and GITHUB_REPO_NAME)
+    """
+    Determine if GitHub persistence should be enabled.
+
+    This implementation now ignores the ``GITHUB_SYNC_DISABLED`` environment
+    variable so long as the required GitHub credentials (token, owner and
+    repository name) are present.  In other words, if you configure
+    ``GITHUB_TOKEN``, ``GITHUB_REPO_OWNER`` and ``GITHUB_REPO_NAME``, the
+    router will always attempt to mirror saved JSON documents to your
+    GitHub repository.  This change allows client JSON files to be
+    persisted to GitHub without depending on the optional disabling flag.
+    """
+    return bool(GITHUB_TOKEN and GITHUB_REPO_OWNER and GITHUB_REPO_NAME)
 
 def _gh_headers() -> Dict[str, str]:
     return {
