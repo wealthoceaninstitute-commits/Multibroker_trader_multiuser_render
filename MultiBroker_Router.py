@@ -898,8 +898,6 @@ def add_client_legacy(
         raise HTTPException(status_code=400, detail="Missing user id. Send X-User-Id header (recommended).")
 
     return add_client(background_tasks=background_tasks, payload=payload, user_id=uid)
-(payload)
-
 @app.post("/clients/edit")
 def edit_client(
     background_tasks: BackgroundTasks,
