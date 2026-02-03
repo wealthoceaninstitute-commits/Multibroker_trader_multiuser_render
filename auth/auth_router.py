@@ -1,86 +1,124 @@
-from fastapi import APIRouter, Body, HTTPException, Form
+from fastapi import APIRouter, Body, HTTPException
 from datetime import datetime
-from typing import Dict, Any
-import hashlib, json, os
+from typing import Dict, Any, Optional
+import hashlib
+import os
 import requests
-from fastapi import Body
 
 from .github_store import github_write_json
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
+# ---- GitHub raw read config (login reads from GitHub) ----
+GITHUB_OWNER = os.getenv("GITHUB_REPO_OWNER", "wealthoceaninstitute-commits")
+GITHUB_REPO  = os.getenv("GITHUB_REPO_NAME", "Multiuser_clients")
+BRANCH = os.getenv("GITHUB_BRANCH", "main")
+
+
+# ---- small helpers ----
+def _norm(s: Optional[str]) -> str:
+    """Normalize user input to avoid invisible whitespace bugs."""
+    return (s or "").strip()
+
+def _safe(s: str) -> str:
+    """Filesystem-safe key (also useful to store email-based profiles)."""
+    s = _norm(s).replace(" ", "_")
+    return "".join(ch for ch in s if ch.isalnum() or ch in ("_", "-"))
+
 def hash_password(p: str) -> str:
-    return hashlib.sha256(p.encode()).hexdigest()
+    # IMPORTANT: always normalize before hashing
+    return hashlib.sha256(_norm(p).encode("utf-8")).hexdigest()
+
 
 @router.post("/register")
 def register(payload: Dict[str, Any] = Body(...)):
     """
     Register a new user.
 
-    Expects a JSON body with `userid`, `email` and `password`.  All
-    three fields are required.  The password is hashed before
-    persistence.  User profiles are stored on GitHub via
-    `github_write_json`.  Any failure to write to GitHub is logged
-    but does not prevent user creation.
+    Required fields: userid, email, password
+
+    Storage:
+      - Primary: data/users/<userid>/profile.json
+      - Secondary (optional): data/users/<safe_email>/profile.json  (enables email login)
     """
-    userid = payload.get("userid")
-    email = payload.get("email")
-    password = payload.get("password")
+    userid = _norm(payload.get("userid"))
+    email = _norm(payload.get("email"))
+    password = _norm(payload.get("password"))
+
     if not userid or not email or not password:
         raise HTTPException(status_code=400, detail="All fields required")
+
     profile = {
         "userid": userid,
         "email": email,
         "password": hash_password(password),
-        "created_at": datetime.utcnow().isoformat()
+        "created_at": datetime.utcnow().isoformat(),
     }
+
     # Attempt to write to GitHub but do not crash on failure
     try:
-        github_write_json(
-            f"data/users/{userid}/profile.json",
-            profile
-        )
+        # Primary location (userid)
+        github_write_json(f"data/users/{userid}/profile.json", profile)
+
+        # Secondary location (safe email) so login can accept email as userid too
+        safe_email = _safe(email)
+        if safe_email and safe_email != userid:
+            github_write_json(f"data/users/{safe_email}/profile.json", profile)
+
     except Exception as e:
-        # Log the error.  In production you might send this to a logger
+        # Don't leak sensitive info
+        print("[auth] GitHub write failed:", str(e)[:200])
 
-
-        print("[auth] GitHub write failed:", e)
     return {"success": True}
 
 
-GITHUB_OWNER = os.getenv("GITHUB_REPO_OWNER", "wealthoceaninstitute-commits")
-GITHUB_REPO  = os.getenv("GITHUB_REPO_NAME", "Multiuser_clients")
-BRANCH = os.getenv("GITHUB_BRANCH", "main")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-
-
-
-from fastapi import APIRouter, Body, HTTPException
-from typing import Dict
-import hashlib, requests, os
-
 @router.post("/login")
-def login(payload: Dict = Body(...)):
-    print("LOGIN HIT payload:", payload)
+def login(payload: Dict[str, Any] = Body(...)):
+    """
+    Login with either:
+      - userid (preferred)
+      - email (supported via safe-email storage + fallback lookups)
 
-    username = payload.get("userid") or payload.get("username")
-    password = payload.get("password")
+    Expects: { userid|username, password }
+    """
+    username = _norm(payload.get("userid") or payload.get("username"))
+    password = _norm(payload.get("password"))
 
     if not username or not password:
         raise HTTPException(status_code=400, detail="Missing credentials")
 
-    path = f"data/users/{username}/profile.json"
-    url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{BRANCH}/{path}"
+    # Never print passwords
+    print("[auth] login attempt:", username)
 
-    r = requests.get(url, timeout=10)
-    if r.status_code != 200:
+    candidates = []
+    # 1) as provided (legacy behavior)
+    candidates.append(username)
+    # 2) safe() version (helps when frontend sends email, or older code used safe keys)
+    safe_u = _safe(username)
+    if safe_u and safe_u not in candidates:
+        candidates.append(safe_u)
+
+    # Try each candidate path until we find a profile.json
+    user = None
+    tried = []
+    for key in candidates:
+        path = f"data/users/{key}/profile.json"
+        tried.append(path)
+        url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{BRANCH}/{path}"
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                user = r.json()
+                break
+        except Exception:
+            continue
+
+    if not user:
+        # Avoid revealing which usernames exist
         raise HTTPException(status_code=401, detail="Invalid login")
 
-    user = r.json()
-    if user["password"] != hashlib.sha256(password.encode()).hexdigest():
+    if user.get("password") != hash_password(password):
         raise HTTPException(status_code=401, detail="Invalid login")
 
-    return {
-        "success": True,
-        "userid": username
-    }
+    # Return the canonical userid stored in profile (important if login used email)
+    return {"success": True, "userid": user.get("userid") or username}
