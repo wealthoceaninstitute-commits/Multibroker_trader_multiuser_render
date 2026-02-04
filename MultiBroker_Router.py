@@ -500,70 +500,56 @@ def health() -> Dict[str, Any]:
 ###############################################################################
 
 @app.get("/search_symbols")
-def search_symbols(q: str = "") -> Dict[str, Any]:
-    """Typeahead symbol search.
+def search_symbols(
+    q: str = Query("", alias="q"),
+    exchange: str = Query("", alias="exchange"),
+):
+    query = (q or "").strip()
+    exchange_filter = (exchange or "").strip().upper()
 
-    Your `security_id.csv`/SQLite schema can differ between versions
-    (e.g. `Stock Symbol` vs `Security Name`). We auto-detect the best
-    columns to prevent `no such column` errors in production.
-    """
+    if not query:
+        return JSONResponse(content={"results": []})
 
-    raw = (q or "").strip().lower()
-    if not raw:
-        return {"results": []}
+    words = [w for w in query.lower().split() if w]
+    if not words:
+        return JSONResponse(content={"results": []})
 
-    def _norm(col: str) -> str:
-        return "".join(ch for ch in (col or "").lower() if ch.isalnum())
+    where_clauses = []
+    params = []
 
-    with symbol_db_lock:
-        conn = sqlite3.connect(SQLITE_DB)
-        try:
-            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({TABLE_NAME})").fetchall()]
-        finally:
-            conn.close()
-
-    norm_map = {_norm(c): c for c in cols}
-
-    symbol_candidates = ["securityname", "stocksymbol", "tradingsymbol", "symbol", "scripname"]
-    id_candidates = ["securityid", "symboltoken", "token", "scripcode", "securitycode"]
-    exch_candidates = ["exchange", "exch"]
-
-    symbol_col = next((norm_map[k] for k in symbol_candidates if k in norm_map), None)
-    id_col = next((norm_map[k] for k in id_candidates if k in norm_map), None)
-    exch_col = next((norm_map[k] for k in exch_candidates if k in norm_map), None)
-
-    if not symbol_col or not id_col:
-        # Return empty instead of crashing if schema is unknown
-        return {"results": []}
-
-    words = [w for w in raw.split() if w]
-    like_params: List[Any] = []
-    where_parts: List[str] = []
     for w in words:
-        where_parts.append(f'LOWER("{symbol_col}") LIKE ?')
-        like_params.append(f"%{w}%")
+        where_clauses.append("LOWER([Stock Symbol]) LIKE ?")
+        params.append(f"%{w}%")
+
+    where_sql = " AND ".join(where_clauses)
+
+    if exchange_filter:
+        where_sql += " AND UPPER(Exchange) = ?"
+        params.append(exchange_filter)
 
     sql = f"""
-        SELECT
-            {('"'+exch_col+'"') if exch_col else "''"} AS Exchange,
-            "{symbol_col}" AS Sym,
-            "{id_col}" AS Sid
+        SELECT Exchange, [Stock Symbol], [Security ID]
         FROM {TABLE_NAME}
-        WHERE {' AND '.join(where_parts)}
-        ORDER BY Sym
-        LIMIT 40
+        WHERE {where_sql}
+        ORDER BY [Stock Symbol]
+        LIMIT 20
     """
 
     with symbol_db_lock:
         conn = sqlite3.connect(SQLITE_DB)
-        try:
-            rows = conn.execute(sql, like_params).fetchall()
-        finally:
-            conn.close()
+        cur = conn.execute(sql, params)
+        rows = cur.fetchall()
+        conn.close()
 
-    results = [{"id": f"{r[0]}|{r[1]}|{r[2]}", "text": f"{r[1]} | {r[0]}"} for r in rows]
-    return {"results": results}
+    results = [
+        {
+            "id": f"{row[0]}|{row[1]}|{row[2]}",
+            "text": f"{row[0]} | {row[1]}",
+        }
+        for row in rows
+    ]
 
+    return JSONResponse(content={"results": results})
 
 ###############################################################################
 # Clients (user-scoped, GitHub persisted like router)
@@ -1329,3 +1315,4 @@ def get_summary(
     uid = require_user(user_id)
     data = summary_data_global.get(uid, {}) or {}
     return {"summary": list(data.values())}
+
