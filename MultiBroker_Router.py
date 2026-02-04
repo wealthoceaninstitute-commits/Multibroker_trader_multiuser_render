@@ -1,7 +1,7 @@
 # MultiBroker_Router.py
 import os, json, importlib, base64
 from typing import Any, Dict, List,Optional
-from fastapi import FastAPI, Body, BackgroundTasks, HTTPException, Header, Query
+from fastapi import FastAPI, Body, BackgroundTasks, HTTPException, Header, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from collections import OrderedDict
 import importlib, os, time
@@ -249,6 +249,46 @@ def _github_file_delete(rel_path: str) -> None:
         raise RuntimeError(f"GitHub delete failed {r.status_code}: {r.text[:300]}")
     print(f"[GITHUB_OK] deleted: {path_in_repo}")
 
+
+
+def _github_read_json(rel_path: str) -> Dict[str, Any]:
+    """Read and decode a JSON file from GitHub under the `data/` prefix.
+    rel_path is relative to BASE_DIR (e.g. 'users/pra/clients/motilal/WOIE1312.json').
+    Returns {} on any failure.
+    """
+    if not _github_enabled():
+        return {}
+    try:
+        path_in_repo = ("data/" + rel_path.lstrip("/")).replace("\\", "/")
+        url = _gh_contents_url(path_in_repo)
+        r = requests.get(url, headers=_gh_headers(), params={"ref": GITHUB_BRANCH}, timeout=30)
+        if r.status_code != 200:
+            return {}
+        j = r.json() or {}
+        b64 = j.get("content") or ""
+        if not b64:
+            return {}
+        raw = base64.b64decode(b64.encode("utf-8")).decode("utf-8", errors="ignore")
+        return json.loads(raw) if raw.strip() else {}
+    except Exception as e:
+        print(f"[GITHUB] read_json failed for {rel_path}: {e}")
+        return {}
+
+def _github_list_dir(rel_dir: str) -> List[Dict[str, Any]]:
+    """List a directory in GitHub under the `data/` prefix. Returns [] on failure."""
+    if not _github_enabled():
+        return []
+    try:
+        dir_in_repo = ("data/" + rel_dir.strip("/")).replace("\\", "/")
+        url = _gh_contents_url(dir_in_repo)
+        r = requests.get(url, headers=_gh_headers(), params={"ref": GITHUB_BRANCH}, timeout=30)
+        if r.status_code != 200:
+            return []
+        j = r.json()
+        return j if isinstance(j, list) else []
+    except Exception as e:
+        print(f"[GITHUB] list_dir failed for {rel_dir}: {e}")
+        return []
 
 def refresh_symbol_db_from_github() -> str:
     """
@@ -1046,20 +1086,65 @@ def edit_client(
     return {"success": True, "message": f"Updated for {broker}. Login started if fields complete."}
 # 
 # 
+
 @app.get("/clients")
-def clients_rows(user_id: str = Header(..., alias="X-User-Id")):
+def clients_rows(
+    response: Response,
+    user_id: str = Header(..., alias="X-User-Id"),
+):
     """
-    List all clients for the authenticated user.  Each row contains
-    minimal client details used by the UI.  Clients are loaded from
-    `data/users/<user>/clients/<broker>`.
+    List all clients for the authenticated user.
+
+    IMPORTANT: In Render, the container filesystem is ephemeral across deploys.
+    So we treat GitHub as the source of truth (when configured) and fall back
+    to local disk only if GitHub is not enabled.
+
+    Storage layout (new multi-user system):
+        data/users/<user>/clients/<broker>/<client_id>.json
     """
-    # Normalise user_id; the legacy variable user_id_q is not defined in this context.
-    user_id = (user_id or "").strip().lower()
-    if not user_id:
-        return {"clients": []}
+    # Hard-disable caching so Cloudflare / browsers don't serve stale client lists.
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+
+    uid = (user_id or "").strip().lower()
+    if not uid:
+        return []
+
     rows: List[Dict[str, Any]] = []
+
+    # --------- Preferred: GitHub (durable across deploys) ---------
+    if _github_enabled():
+        for broker in ("dhan", "motilal"):
+            rel_dir = f"users/{_safe(uid)}/clients/{broker}"
+            items = _github_list_dir(rel_dir)
+            for it in items:
+                try:
+                    if (it.get("type") != "file"):
+                        continue
+                    name = it.get("name") or ""
+                    if not name.endswith(".json"):
+                        continue
+                    rel_path = f"{rel_dir}/{name}"
+                    d = _github_read_json(rel_path) or {}
+                    if not d:
+                        continue
+                    rows.append({
+                        "name": d.get("name", "") or d.get("display_name", "") or "",
+                        "display_name": d.get("name", "") or d.get("display_name", "") or "",
+                        "client_id": d.get("userid", "") or d.get("client_id", "") or "",
+                        "capital": d.get("capital", "") or "",
+                        "status": "logged_in" if d.get("session_active") else "logged_out",
+                        "session_active": bool(d.get("session_active", False)),
+                        "broker": (d.get("broker") or broker),
+                    })
+                except Exception:
+                    continue
+        return rows
+
+    # --------- Fallback: local disk (dev / single-instance only) ---------
     for broker in ("dhan", "motilal"):
-        folder = os.path.join(_user_clients_root(user_id), broker)
+        folder = os.path.join(_user_clients_root(uid), broker)
         try:
             for fn in os.listdir(folder):
                 if not fn.endswith(".json"):
@@ -1068,36 +1153,46 @@ def clients_rows(user_id: str = Header(..., alias="X-User-Id")):
                 try:
                     d = _load(path)
                     rows.append({
-                        "name": d.get("name", ""),
-                        "display_name": d.get("name", ""),
-                        "client_id": d.get("userid", ""),
-                        "capital": d.get("capital", ""),
+                        "name": d.get("name", "") or d.get("display_name", "") or "",
+                        "display_name": d.get("name", "") or d.get("display_name", "") or "",
+                        "client_id": d.get("userid", "") or d.get("client_id", "") or "",
+                        "capital": d.get("capital", "") or "",
                         "status": "logged_in" if d.get("session_active") else "logged_out",
                         "session_active": bool(d.get("session_active", False)),
-                        "broker": broker,
+                        "broker": (d.get("broker") or broker),
                     })
                 except Exception:
                     pass
         except FileNotFoundError:
             continue
     return rows
-# 
+
+
 @app.get("/get_clients")
-def get_clients_legacy(user_id: str = Header(..., alias="X-User-Id")):
+def get_clients_legacy(
+    response: Response,
+    user_id: str = Header(..., alias="X-User-Id"),
+):
     """
-    Legacy endpoint to support old UI format.  Returns a list of
-    clients with simplified fields.
+    Legacy endpoint to support old UI format.
+
+    Returns:
+        { "clients": [ {name, client_id, capital, session}, ... ] }
     """
-    rows = clients_rows(user_id)  # reuse new implementation
-    return {"clients": [
-        {
-            "name": r["name"],
-            "client_id": r["client_id"],
-            "capital": r["capital"],
-            "session": "Logged in" if r["session_active"] else "Logged out",
-        }
-        for r in rows
-    ]}
+    rows = clients_rows(response=response, user_id=user_id)
+    return {
+        "clients": [
+            {
+                "name": r.get("name", ""),
+                "client_id": r.get("client_id", ""),
+                "capital": r.get("capital", ""),
+                "session": "Logged in" if r.get("session_active") else "Logged out",
+                "broker": r.get("broker", ""),
+            }
+            for r in (rows or [])
+        ]
+    }
+
 @app.post("/clients/delete")
 def delete_client(
     payload: Dict[str, Any] = Body(...),
