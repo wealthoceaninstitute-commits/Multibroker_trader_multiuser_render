@@ -44,6 +44,35 @@ from fastapi import (BackgroundTasks, Body, FastAPI, HTTPException, Header,
                      Response)
 from fastapi.middleware.cors import CORSMiddleware
 
+###############################################################################
+# Additional imports and globals for Motilal trading endpoints
+#
+# The single‑user CT_FastAPI implementation exposed a rich set of order‑ and
+# portfolio‑related routes (e.g. placing orders, fetching open orders,
+# positions, holdings and closing positions).  Those helpers rely on
+# broker‑specific modules such as ``Broker_motilal`` to perform the actual
+# API calls.  To provide equivalent functionality in this multi‑user router
+# we import a handful of standard libraries up front and initialise a few
+# module‑level variables.  These include small utilities for safe integer
+# parsing and quantity selection as well as a cache for per‑client summary
+# data.  These helpers are defined here rather than inline in each route
+# handler for clarity and to mirror the structure of the original code.
+
+import importlib
+import csv
+import logging
+import math
+import threading
+from collections import OrderedDict
+
+# --- Globals for positions and holdings summary (motilal only) ---
+# position_meta is used by the close_position/convert_position logic to look
+# up metadata (exchange, symboltoken, product type) for a given client and
+# symbol.  summary_data_global caches account summaries for /get_summary.
+position_meta: Dict[tuple, Dict[str, Any]] = {}
+summary_data_global: Dict[str, Dict[str, Any]] = {}
+
+
 try:
     # Optional authentication router.  If absent the import will fail quietly.
     from auth.auth_router import router as auth_router  # type: ignore
@@ -1239,6 +1268,554 @@ def _github_list_dir(rel_dir: str) -> List[Dict[str, Any]]:
     """
     if not _github_enabled():
         return []
+
+
+###############################################################################
+# Motilal order and portfolio endpoints
+###############################################################################
+
+def _safe_int(val: Any, default: int = 0) -> int:
+    """
+    Best‑effort conversion of arbitrary input into an integer.  Empty strings
+    evaluate to the provided default.  If the input cannot be converted,
+    ``default`` is returned.
+
+    Parameters
+    ----------
+    val: Any
+        The value to convert.
+    default: int, optional
+        Fallback value when conversion fails.  Defaults to 0.
+
+    Returns
+    -------
+    int
+        Parsed integer or ``default``.
+    """
+    try:
+        if val is None:
+            return default
+        s = str(val).strip()
+        if s == "":
+            return default
+        return int(float(s))
+    except Exception:
+        return default
+
+
+def _index_clients(user_id: str | None = None) -> Dict[str, Dict[str, Any]]:
+    """
+    Build an index of Motilal clients keyed by userid.  If ``user_id`` is
+    provided only that user's clients are indexed; otherwise all users are
+    scanned.  Each entry contains the broker (always ``motilal`` in this
+    implementation), the loaded JSON document and a display name.
+
+    Parameters
+    ----------
+    user_id: str | None
+        Optional user identifier to restrict the search to a single user's
+        clients.  When ``None`` all user directories are scanned.
+
+    Returns
+    -------
+    Dict[str, Dict[str, Any]]
+        Mapping of userid → dict with keys ``broker``, ``json`` and ``name``.
+    """
+    idx: Dict[str, Dict[str, Any]] = {}
+    users: List[str] = []
+    # Determine which user directories to scan
+    if user_id:
+        users = [_safe(user_id)] if _safe(user_id) else []
+    else:
+        try:
+            users = [d for d in os.listdir(USERS_ROOT) if os.path.isdir(os.path.join(USERS_ROOT, d))]
+        except Exception:
+            users = []
+    for uid in users:
+        folder = os.path.join(USERS_ROOT, uid, "clients", "motilal")
+        try:
+            for fn in os.listdir(folder):
+                if not fn.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(folder, fn), "r", encoding="utf-8") as f:
+                        cj = json.load(f)
+                except Exception:
+                    continue
+                # derive userid and name
+                cid = str(cj.get("userid") or cj.get("client_id") or "").strip()
+                if not cid:
+                    continue
+                idx[cid] = {
+                    "broker": "motilal",
+                    "json": cj,
+                    "name": cj.get("name") or cj.get("display_name") or cid,
+                }
+        except FileNotFoundError:
+            continue
+    return idx
+
+
+def _pick_qty_for_client(ci: Dict[str, Any], per_client_qty: Dict[str, Any], default_qty: int) -> int:
+    """
+    Resolve a per‑client quantity from a user‑provided map.  Several keys are
+    tried in turn: ``userid``/``client_id``, the client's display name and
+    the display name up to the first colon (to support labels like
+    ``"Edison : 1100922501"``).  If none of the candidate keys match in
+    ``per_client_qty`` the ``default_qty`` is returned.
+
+    Parameters
+    ----------
+    ci: Dict[str, Any]
+        Client descriptor containing ``userid`` and ``name`` fields.
+    per_client_qty: Dict[str, Any]
+        Mapping of keys to quantities.
+    default_qty: int
+        Fallback quantity if no matches found.
+
+    Returns
+    -------
+    int
+        The resolved quantity for the client.
+    """
+    if not isinstance(per_client_qty, dict):
+        return default_qty
+    keys: List[str] = []
+    keys.append(str(ci.get("userid") or ci.get("client_id") or "").strip())
+    nm = (ci.get("name") or ci.get("display_name") or "").strip()
+    if nm:
+        keys.append(nm)
+        keys.append(nm.split(":")[0].strip())
+    for k in keys:
+        if k and k in per_client_qty:
+            q = _safe_int(per_client_qty.get(k), default=None)
+            if q is not None:
+                return q
+    return default_qty
+
+
+@app.post("/place_orders")
+def route_place_orders(
+    payload: Dict[str, Any] = Body(...),
+    user_id: str = Header(None, alias="X-User-Id"),
+) -> Dict[str, Any]:
+    """
+    Place one or more Motilal orders.  This endpoint accepts the same
+    payload shape as the single‑user implementation but operates only on
+    Motilal clients.  When ``groupacc`` is true the ``groups`` field should
+    contain the identifiers or names of groups to send the orders to; the
+    group documents are loaded from ``data/groups``.  If ``groupacc`` is
+    false the ``clients`` array is interpreted as a list of individual
+    client IDs.  Quantities can be provided per client or per group via
+    ``perClientQty`` and ``perGroupQty`` respectively.  When not provided
+    the default quantity ``quantityinlot`` is used.
+
+    The final list of order dictionaries is dispatched to the broker module
+    ``Broker_motilal`` via its ``place_orders`` function if available.  The
+    returned result from the broker call is included in the response.
+    """
+    data = payload or {}
+
+    # Robust symbol parsing ("NSE|PNB EQ|110666|17000")
+    raw_symbol = (data.get("symbol") or "").strip()
+    explicit_tok = data.get("symboltoken") or data.get("token")
+    parts = [p.strip() for p in raw_symbol.split("|") if p is not None]
+    exchange_from_symbol = parts[0] if len(parts) > 0 else ""
+    stock_symbol = parts[1] if len(parts) > 1 else ""
+    symboltoken = parts[3] if len(parts) > 3 else ""
+    if not symboltoken and explicit_tok:
+        symboltoken = str(explicit_tok)
+    exchange_val = (data.get("exchange") or exchange_from_symbol or "NSE").upper()
+
+    # Common UI fields
+    groupacc = bool(data.get("groupacc", False))
+    groups_sel: List[str] = data.get("groups", []) or []
+    clients_sel: List[str] = data.get("clients", []) or []
+    diffQty = bool(data.get("diffQty", False))
+    multiplier_flag = bool(data.get("multiplier", False))
+    qtySelection = data.get("qtySelection", "manual")
+    quantityinlot = int(data.get("quantityinlot", 0) or 0)
+    perClientQty = data.get("perClientQty", {}) or {}
+    perGroupQty = data.get("perGroupQty", {}) or {}
+    action = (data.get("action") or "").upper()
+    ordertype = (data.get("ordertype") or "").upper()
+    producttype = data.get("producttype") or ""
+    orderduration = data.get("orderduration") or "DAY"
+    price = float(data.get("price", 0) or 0)
+    triggerprice = float(data.get("triggerprice", 0) or 0)
+    disclosedqty = int(data.get("disclosedquantity", 0) or 0)
+    amoorder = data.get("amoorder", "N")
+    correlation_id = data.get("correlationId") or data.get("correlation_id") or ""
+
+    if ordertype == "LIMIT" and price <= 0:
+        raise HTTPException(status_code=400, detail="Price must be > 0 for LIMIT orders.")
+    if "SL" in ordertype and triggerprice <= 0:
+        raise HTTPException(status_code=400, detail="Trigger price is required for SL/SL-M orders.")
+
+    # Build an index of clients for the current user (or all if header missing)
+    client_index = _index_clients(user_id)
+
+    # Helper to build one order dictionary
+    def _build_order(client_id: str, qty: int, tag: Optional[str]) -> Dict[str, Any]:
+        ci = client_index.get(str(client_id))
+        if not ci:
+            # Include a marker to skip this order
+            return {"_skip": True, "reason": "client_not_found", "client_id": client_id}
+        return {
+            "client_id": str(client_id),
+            "name": ci["name"],
+            "broker": ci["broker"],  # always motilal
+            "action": action,
+            "ordertype": ordertype,
+            "producttype": producttype,
+            "orderduration": orderduration,
+            "exchange": exchange_val,
+            "price": price,
+            "triggerprice": triggerprice,
+            "disclosedquantity": disclosedqty,
+            "amoorder": amoorder,
+            "qty": int(qty),
+            "tag": tag or "",
+            "correlation_id": correlation_id,
+            "symbol": raw_symbol,
+            "symboltoken": str(symboltoken or ""),
+            "stock_symbol": stock_symbol,
+        }
+
+    # Expand to per‑client orders
+    per_client_orders: List[Dict[str, Any]] = []
+    if groupacc:
+        # Helper to extract member ids from a group document
+        def _member_ids(doc: Dict[str, Any]) -> List[str]:
+            out: List[str] = []
+            raw = doc.get("members") or []
+            for m in raw:
+                if isinstance(m, dict):
+                    uid = (m.get("userid") or m.get("client_id") or m.get("id") or "").strip()
+                else:
+                    uid = str(m).strip()
+                if uid and uid not in out:
+                    out.append(uid)
+            return out
+        for gsel in groups_sel:
+            # Attempt to locate the group JSON file by id or name
+            gp = _find_group_path(gsel)
+            if not gp or not os.path.exists(gp):
+                per_client_orders.append({"_skip": True, "reason": f"group_file_missing:{gsel}"})
+                continue
+            try:
+                with open(gp, "r", encoding="utf-8") as f:
+                    gdoc = json.load(f) or {}
+            except Exception:
+                per_client_orders.append({"_skip": True, "reason": f"group_file_bad:{gsel}"})
+                continue
+            gname = gdoc.get("name") or gdoc.get("id") or str(gsel)
+            gkey = gdoc.get("id") or gname
+            members = _member_ids(gdoc)
+            group_multiplier = int(gdoc.get("multiplier", 1) or 1)
+            for client_id in members:
+                if qtySelection == "auto":
+                    # auto sizing not yet implemented for multi‑user; fall back to quantityinlot
+                    q = quantityinlot
+                elif diffQty:
+                    q = int((perGroupQty.get(gkey) or perGroupQty.get(gname) or 0) or 0)
+                elif multiplier_flag:
+                    q = quantityinlot * group_multiplier
+                else:
+                    q = quantityinlot
+                per_client_orders.append(_build_order(str(client_id), q, gname))
+    else:
+        for client_id in clients_sel:
+            if qtySelection == "auto":
+                q = quantityinlot  # auto sizing not implemented; fallback
+            elif diffQty:
+                q = int(perClientQty.get(str(client_id), 0) or 0)
+            else:
+                q = quantityinlot
+            per_client_orders.append(_build_order(str(client_id), q, None))
+
+    # Bucket by broker (only motilal in this version)
+    by_broker: Dict[str, List[Dict[str, Any]]] = {"motilal": []}
+    skipped: List[Dict[str, Any]] = []
+    for od in per_client_orders:
+        if od.get("_skip"):
+            skipped.append(od)
+            continue
+        brk = od.get("broker")
+        if brk == "motilal":
+            by_broker.setdefault("motilal", []).append(od)
+
+    # Print dispatch summary
+    try:
+        if by_broker.get("motilal"):
+            logging.debug(f"[router] MOTILAL orders ({len(by_broker['motilal'])}) ->\n" + json.dumps(by_broker["motilal"], indent=2))
+    except Exception:
+        pass
+
+    results: Dict[str, Any] = {"skipped": skipped}
+    orders_list = by_broker.get("motilal", [])
+    if orders_list:
+        try:
+            mod = importlib.import_module("Broker_motilal")
+            try:
+                mod = importlib.reload(mod)
+            except Exception:
+                pass
+            fn = getattr(mod, "place_orders", None)
+            if callable(fn):
+                res = fn(orders_list)
+            else:
+                # fall back to single order if place_orders not provided
+                single_fn = getattr(mod, "place_order", None)
+                if callable(single_fn):
+                    res = [single_fn(od) for od in orders_list]
+                else:
+                    res = {"status": "error", "message": "place_orders not implemented"}
+        except Exception as e:
+            res = {"status": "error", "message": str(e)}
+        results["motilal"] = res
+    return {"status": "completed", "result": results}
+
+
+@app.post("/place_order")
+def route_place_order_compat(
+    payload: Dict[str, Any] = Body(...),
+    user_id: str = Header(None, alias="X-User-Id"),
+) -> Dict[str, Any]:
+    """
+    Compatibility layer for front‑ends posting to ``/place_order``.  Simply
+    forwards the payload to :func:`route_place_orders`.  The optional
+    ``X‑User‑Id`` header is passed through to restrict which clients may
+    receive orders.
+    """
+    return route_place_orders(payload, user_id)
+
+
+@app.get("/get_orders")
+def route_get_orders() -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Fetch the current order book for all logged in Motilal clients.  This
+    implementation delegates to the ``Broker_motilal.get_orders`` function if
+    available.  The return structure mirrors the single‑user implementation
+    with buckets labelled ``pending``, ``traded``, ``rejected``, ``cancelled``
+    and ``others``.
+    """
+    buckets = OrderedDict({k: [] for k in ["pending", "traded", "rejected", "cancelled", "others"]})
+    try:
+        mod = importlib.import_module("Broker_motilal")
+        fn = getattr(mod, "get_orders", None)
+        if callable(fn):
+            res = fn()
+            if isinstance(res, dict):
+                for k in buckets.keys():
+                    buckets[k].extend(res.get(k, []) or [])
+    except Exception as e:
+        logging.error(f"[router] get_orders error: {e}")
+    return buckets
+
+
+@app.get("/get_positions")
+def route_get_positions() -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Retrieve open and closed positions across all Motilal clients.  This
+    function calls ``Broker_motilal.get_positions`` if present and merges
+    its ``open`` and ``closed`` arrays into a single result.  Any
+    exceptions during broker calls are logged and an empty structure is
+    returned.
+    """
+    buckets = {"open": [], "closed": []}
+    try:
+        mod = importlib.import_module("Broker_motilal")
+        fn = getattr(mod, "get_positions", None)
+        if callable(fn):
+            res = fn()
+            if isinstance(res, dict):
+                buckets["open"].extend(res.get("open", []) or [])
+                buckets["closed"].extend(res.get("closed", []) or [])
+    except Exception as e:
+        logging.error(f"[router] get_positions error: {e}")
+    return buckets
+
+
+@app.post("/cancel_order")
+def route_cancel_order(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """
+    Cancel one or more pending Motilal orders.  The payload must contain an
+    ``orders`` array where each element has at minimum ``name`` (client
+    display name) and ``order_id`` fields.  Orders with unknown client
+    names are ignored.  The function calls the broker's ``cancel_orders``
+    or ``cancel_order`` helper and aggregates the resulting messages.
+    """
+    orders = payload.get("orders", [])
+    if not isinstance(orders, list) or not orders:
+        raise HTTPException(status_code=400, detail="No orders received for cancellation.")
+    messages: List[str] = []
+    unknown: List[str] = []
+
+    # Build list of orders to cancel per broker (only motilal)
+    to_cancel: List[Dict[str, Any]] = []
+    for od in orders:
+        name = (od or {}).get("name", "").strip()
+        if not name:
+            unknown.append(str(od))
+            continue
+        to_cancel.append(od)
+
+    if to_cancel:
+        try:
+            mod = importlib.import_module("Broker_motilal")
+            # Prefer batch API
+            cancel_many = getattr(mod, "cancel_orders", None)
+            if callable(cancel_many):
+                res = cancel_many(to_cancel)
+                if isinstance(res, list):
+                    messages.extend([str(x) for x in res])
+                elif isinstance(res, dict) and isinstance(res.get("message"), list):
+                    messages.extend([str(x) for x in res["message"]])
+                else:
+                    messages.append(str(res))
+            else:
+                # fallback: call cancel_order on each
+                cancel_one = getattr(mod, "cancel_order", None)
+                if callable(cancel_one):
+                    for od in to_cancel:
+                        try:
+                            r = cancel_one(od)
+                            if isinstance(r, dict) and r.get("message"):
+                                messages.append(str(r["message"]))
+                            else:
+                                messages.append(str(r))
+                        except Exception as e:
+                            messages.append(f"Error cancelling {od.get('order_id')}: {str(e)}")
+                else:
+                    messages.append("cancel_orders not implemented in broker")
+        except Exception as e:
+            messages.append(f"Broker error: {str(e)}")
+    if unknown:
+        messages.append("Unknown client names for orders: " + ", ".join(sorted(set(unknown))))
+    return {"message": messages}
+
+
+@app.get("/get_holdings")
+def route_get_holdings() -> Dict[str, Any]:
+    """
+    Fetch DP holdings and account summary for all Motilal clients.  The broker
+    module's ``get_holdings`` function is called and its return value
+    (expected to be a dict with ``holdings`` and ``summary`` keys) is
+    flattened.  The per‑client summary is cached for the /get_summary
+    endpoint.  Any errors during broker calls are logged.
+    """
+    global summary_data_global
+    buckets = {"holdings": [], "summary": []}
+    try:
+        mod = importlib.import_module("Broker_motilal")
+        fn = getattr(mod, "get_holdings", None)
+        if callable(fn):
+            res = fn()
+            if isinstance(res, dict):
+                buckets["holdings"].extend(res.get("holdings", []) or [])
+                buckets["summary"].extend(res.get("summary", []) or [])
+    except Exception as e:
+        logging.error(f"[router] get_holdings error: {e}")
+    # build summary_data_global keyed by name
+    summary_data_global = {}
+    for i, s in enumerate(buckets["summary"]):
+        if isinstance(s, dict):
+            key = s.get("name") or f"client_{i}"
+            summary_data_global[key] = s
+    return buckets
+
+
+@app.get("/get_summary")
+def route_get_summary() -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Return the cached account summary computed by :func:`route_get_holdings`.
+    The summary is wrapped in a ``summary`` key for backwards compatibility.
+    """
+    return {"summary": list(summary_data_global.values())}
+
+
+@app.post("/close_positions")
+def route_close_positions(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """
+    Close one or more open positions for Motilal clients.  The payload must
+    contain a ``positions`` array with objects that include at least a
+    ``name`` (client display name) and ``symbol``.  The function delegates
+    to ``Broker_motilal.close_positions`` if available, passing the list of
+    position descriptors verbatim.  Any returned messages are aggregated
+    into a single response.
+    """
+    items = payload.get("positions")
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="'positions' must be a list")
+    messages: List[str] = []
+    try:
+        mod = importlib.import_module("Broker_motilal")
+        fn = getattr(mod, "close_positions", None)
+        if callable(fn):
+            res = fn(items)
+            if isinstance(res, list):
+                messages.extend([str(x) for x in res])
+            elif isinstance(res, dict):
+                msgs = res.get("message") or res.get("messages") or []
+                if isinstance(msgs, list):
+                    messages.extend([str(x) for x in msgs])
+                else:
+                    messages.append(str(res))
+        else:
+            messages.append("close_positions not implemented in broker")
+    except Exception as e:
+        messages.append(f"Broker error: {str(e)}")
+    return {"message": messages}
+
+
+@app.post("/convert_position")
+def route_convert_position(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """
+    Convert the product type of one or more positions for Motilal clients.
+    The payload should include a ``positions`` array with each element
+    containing ``name``, ``symbol``, ``quantity``, ``exchange``,
+    ``oldproduct`` and ``newproduct``.  The implementation tries to call
+    ``Broker_motilal.convert_positions`` or ``convert_position`` if
+    available.  Any returned messages are collected.
+    """
+    data = payload or {}
+    items = data.get("positions", [])
+    if not isinstance(items, list) or not items:
+        raise HTTPException(status_code=400, detail="No positions received for conversion.")
+    messages: List[str] = []
+    try:
+        mod = importlib.import_module("Broker_motilal")
+        # Prefer batch API first
+        fn_many = getattr(mod, "convert_positions", None)
+        if callable(fn_many):
+            res = fn_many(items)
+            if isinstance(res, list):
+                messages.extend([str(x) for x in res])
+            elif isinstance(res, dict):
+                msgs = res.get("message") or res.get("messages") or []
+                if isinstance(msgs, list):
+                    messages.extend([str(x) for x in msgs])
+                else:
+                    messages.append(str(res))
+        else:
+            # Fallback to single call
+            fn_one = getattr(mod, "convert_position", None)
+            if callable(fn_one):
+                for itm in items:
+                    try:
+                        r = fn_one(itm)
+                        if isinstance(r, dict) and r.get("message"):
+                            messages.append(str(r["message"]))
+                        else:
+                            messages.append(str(r))
+                    except Exception as e:
+                        messages.append(f"Error converting {itm.get('symbol')}: {str(e)}")
+            else:
+                messages.append("convert_position(s) not implemented in broker")
+    except Exception as e:
+        messages.append(f"Broker error: {str(e)}")
+    return {"message": messages}
     try:
         dir_in_repo = ("data/" + rel_dir.strip("/")).replace("\\", "/")
         url = _gh_contents_url(dir_in_repo)
