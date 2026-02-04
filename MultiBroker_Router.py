@@ -500,26 +500,47 @@ def health() -> Dict[str, Any]:
 ###############################################################################
 
 @app.get("/search_symbols")
-def search_symbols(q: str = "") -> Dict[str, Any]:
-    q = (q or "").strip()
-    if not q:
-        return {"results": []}
+def search_symbols(q: str = Query("", alias="q"), exchange: str = Query("", alias="exchange")):
+    query = (q or "").strip()
+    exchange_filter = (exchange or "").strip().upper()
 
-    like = f"%{q}%"
+    if not query:
+        return JSONResponse(content={"results": []})
+
+    words = [w for w in query.lower().split() if w]
+    if not words:
+        return JSONResponse(content={"results": []})
+
+    where_clauses = []
+    params = []
+    for w in words:
+        where_clauses.append("LOWER([Stock Symbol]) LIKE ?")
+        params.append(f"%{w}%")
+
+    where_sql = " AND ".join(where_clauses)
+    if exchange_filter:
+        where_sql += " AND UPPER(Exchange) = ?"
+        params.append(exchange_filter)
+
     sql = f"""
-        SELECT [Security ID], [Security Name], [Exchange]
+        SELECT Exchange, [Stock Symbol], [Security ID]
         FROM {TABLE_NAME}
-        WHERE [Security Name] LIKE ?
+        WHERE {where_sql}
+        ORDER BY [Stock Symbol]
         LIMIT 20
     """
+
     with symbol_db_lock:
         conn = sqlite3.connect(SQLITE_DB)
-        cur = conn.execute(sql, (like,))
+        cur = conn.execute(sql, params)
         rows = cur.fetchall()
         conn.close()
 
-    results = [{"id": f"{row[2]}|{row[1]}|{row[0]}", "text": f"{row[1]} | {row[2]}"} for row in rows]
-    return {"results": results}
+    results = [
+        {"id": f"{row[0]}|{row[1]}|{row[2]}", "text": f"{row[0]} | {row[1]}"}
+        for row in rows
+    ]
+    return JSONResponse(content={"results": results})
 
 
 ###############################################################################
@@ -1286,3 +1307,4 @@ def get_summary(
     uid = require_user(user_id)
     data = summary_data_global.get(uid, {}) or {}
     return {"summary": list(data.values())}
+
