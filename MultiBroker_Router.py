@@ -41,11 +41,12 @@ import threading
 from datetime import datetime
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
-
+from fastapi import FastAPI, Body, Header, HTTPException, Query
+from fastapi.responses import JSONResponse
 import requests
 import pyotp
 import pandas as pd
-from fastapi import FastAPI, Body, Header, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Body, Header, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 # --- Motilal SDK (must exist in your deployment image) ---
@@ -1315,4 +1316,5 @@ def get_summary(
     uid = require_user(user_id)
     data = summary_data_global.get(uid, {}) or {}
     return {"summary": list(data.values())}
+
 
