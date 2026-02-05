@@ -587,11 +587,13 @@ async def clients_add(
 
 @app.get("/get_clients")
 def get_clients(
+    background_tasks: BackgroundTasks,
+    autologin: int = Query(1, alias="autologin"),   # default ON
     user_id: str = Header(..., alias="X-User-Id"),
 ) -> Dict[str, Any]:
     uid = require_user(user_id)
 
-    # Build a fast lookup of client_ids that are currently logged-in (runtime sessions)
+    # runtime sessions (after restart this will be empty)
     runtime_logged_in = set()
     try:
         for _nm, (_mofsl, cid) in _sessions_for_user(uid).items():
@@ -610,11 +612,14 @@ def get_clients(
 
         client_id = str(d.get("userid", "") or d.get("client_id", "") or "").strip()
 
-        # ✅ Prefer live runtime session (truthy if login already happened)
+        # ✅ schedule login if session missing and autologin enabled
+        if autologin == 1 and client_id and client_id not in runtime_logged_in:
+            background_tasks.add_task(login_client, uid, d)
+
+        # show status
         if client_id and client_id in runtime_logged_in:
             session_status = "Logged in"
         else:
-            # fallback to persisted flag
             session_status = "Logged in" if d.get("session_active") else "pending"
 
         out.append(
@@ -1337,6 +1342,7 @@ def get_summary(
     uid = require_user(user_id)
     data = summary_data_global.get(uid, {}) or {}
     return {"summary": list(data.values())}
+
 
 
 
