@@ -590,22 +590,43 @@ def get_clients(
     user_id: str = Header(..., alias="X-User-Id"),
 ) -> Dict[str, Any]:
     uid = require_user(user_id)
+
+    # Build a fast lookup of client_ids that are currently logged-in (runtime sessions)
+    runtime_logged_in = set()
+    try:
+        for _nm, (_mofsl, cid) in _sessions_for_user(uid).items():
+            runtime_logged_in.add(str(cid))
+    except Exception:
+        pass
+
     rel_dir = f"users/{_safe(uid)}/clients/motilal"
     out: List[Dict[str, Any]] = []
+
     for fn in _store_list_json(rel_dir):
         rel = f"{rel_dir}/{fn}"
         d = _store_read_json(rel) or {}
         if not isinstance(d, dict):
             continue
+
+        client_id = str(d.get("userid", "") or d.get("client_id", "") or "").strip()
+
+        # ✅ Prefer live runtime session (truthy if login already happened)
+        if client_id and client_id in runtime_logged_in:
+            session_status = "Logged in"
+        else:
+            # fallback to persisted flag
+            session_status = "Logged in" if d.get("session_active") else "pending"
+
         out.append(
             {
                 "name": d.get("name", "") or d.get("display_name", ""),
-                "client_id": d.get("userid", "") or d.get("client_id", ""),
+                "client_id": client_id,
                 "capital": d.get("capital", "") or "",
-                "session": "Logged in" if d.get("session_active") else "Logged out",
+                "session": session_status,
                 "broker": "motilal",
             }
         )
+
     return {"clients": out}
 
 
@@ -1316,5 +1337,6 @@ def get_summary(
     uid = require_user(user_id)
     data = summary_data_global.get(uid, {}) or {}
     return {"summary": list(data.values())}
+
 
 
