@@ -588,12 +588,12 @@ async def clients_add(
 @app.get("/get_clients")
 def get_clients(
     background_tasks: BackgroundTasks,
-    autologin: int = Query(1, alias="autologin"),   # default ON
+    autologin: int = Query(1, alias="autologin"),  # 1 = auto login on load
     user_id: str = Header(..., alias="X-User-Id"),
 ) -> Dict[str, Any]:
     uid = require_user(user_id)
 
-    # runtime sessions (after restart this will be empty)
+    # runtime sessions (after restart this will be empty until we login)
     runtime_logged_in = set()
     try:
         for _nm, (_mofsl, cid) in _sessions_for_user(uid).items():
@@ -612,15 +612,15 @@ def get_clients(
 
         client_id = str(d.get("userid", "") or d.get("client_id", "") or "").strip()
 
-        # ✅ schedule login if session missing and autologin enabled
+        # ✅ trigger login in background if not already in runtime sessions
         if autologin == 1 and client_id and client_id not in runtime_logged_in:
             background_tasks.add_task(login_client, uid, d)
 
-        # show status
+        # ✅ status: runtime session is the real truth
         if client_id and client_id in runtime_logged_in:
             session_status = "Logged in"
         else:
-            session_status = "Logged in" if d.get("session_active") else "pending"
+            session_status = "pending"  # keep your UI wording
 
         out.append(
             {
@@ -1342,6 +1342,7 @@ def get_summary(
     uid = require_user(user_id)
     data = summary_data_global.get(uid, {}) or {}
     return {"summary": list(data.values())}
+
 
 
 
