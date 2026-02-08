@@ -31,6 +31,19 @@ _MO_DIR     = CLIENTS_DIR
 # Path to symbols.db built by MultiBroker_Router.refresh_symbols()
 SQLITE_DB = os.path.join(DATA_DIR, "symbols.db")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://multibroker-trader-multiuser.vercel.app",
+        "https://multibroker-trader-multiuser-render.onrender.com",
+        # + any other fixed domains you use
+    ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 def _read_clients() -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
@@ -903,6 +916,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
