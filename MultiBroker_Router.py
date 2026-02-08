@@ -73,6 +73,7 @@ app.add_middleware(
         "https://multibrokertrader-production.up.railway.app",
         "https://multibroker-trader.onrender.com",
         "https://multibrokertrader-production-b4e2.up.railway.app"
+        "https://multibroker-trader-multiuser.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
