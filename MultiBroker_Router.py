@@ -37,7 +37,7 @@ _symbol_db_lock = threading.Lock()
 # --- GitHub global config (single source of truth) ---
 GITHUB_TOKEN  = os.getenv("GITHUB_TOKEN")                       # <-- set in Railway
 GITHUB_OWNER  = os.getenv("GITHUB_REPO_OWNER") or "wealthoceaninstitute-commits"
-GITHUB_REPO   = os.getenv("GITHUB_REPO_NAME")  or "Clients"
+GITHUB_REPO   = os.getenv("GITHUB_REPO_NAME")  or "Multiuser_clients"
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 
 def GH_HEADERS():
