@@ -14,4 +14,4 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
-CMD ["uvicorn", "motilal_trader:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "MultiBroker_Router:app", "--host", "0.0.0.0", "--port", "8080"]
