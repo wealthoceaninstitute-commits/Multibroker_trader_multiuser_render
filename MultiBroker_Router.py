@@ -64,6 +64,7 @@ from MOFSLOPENAPI import MOFSLOPENAPI  # type: ignore
 # Optional auth router (same import as your router)
 try:
     from auth.auth_router import router as auth_router  # type: ignore
+    app.include_router(auth_router, tags=["auth"])
 except Exception:
     auth_router = None  # type: ignore
 
