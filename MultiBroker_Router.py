@@ -594,7 +594,7 @@ def search_symbols(
 # Clients (user-scoped, GitHub persisted like router)
 ###############################################################################
 
-@app.post("/clients/add")
+@app.post("/add_client")
 async def clients_add(
     background_tasks: BackgroundTasks,
     payload: Dict[str, Any] = Body(...),
@@ -695,7 +695,7 @@ def get_clients(
     return {"clients": out}
 
 
-@app.post("/clients/delete")
+@app.post("/delete_client")
 async def clients_delete(
     payload: Dict[str, Any] = Body(...),
     user_id: Optional[str] = Header(None, alias="X-User-Id"),
